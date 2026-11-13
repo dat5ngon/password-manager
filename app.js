@@ -272,11 +272,16 @@ document.addEventListener('DOMContentLoaded', function() {
   }
   showLockScreen();
 
-  // Listen for vault creation in another tab -- if this tab is still on the
-  // "Create" screen, switch to unlock mode automatically.
+  // Listen for cross-tab events via localStorage changes.
   window.addEventListener('storage', function(e) {
+    // Another tab created the vault while this tab shows "Create" screen
     if (e.key === 'pm_salt' && e.newValue && !cryptoKey) {
       showLockScreen();
+    }
+    // Another tab locked the vault -- lock this tab too
+    if (e.key === 'pm_locked' && e.newValue && cryptoKey) {
+      lockVault(true); // silent = true, don't re-broadcast
+      showToast('Vault locked from another tab', 'warning');
     }
   });
 });
@@ -384,10 +389,14 @@ function onVaultUnlocked() {
   startAutoLockTimer();
 }
 
-function lockVault() {
+function lockVault(silent) {
   stopAutoLockTimer();
   cryptoKey = null;
   accounts = [];
+  // Broadcast lock to other tabs (unless this was triggered by a storage event)
+  if (!silent) {
+    localStorage.setItem('pm_locked', Date.now().toString());
+  }
   showLockScreen();
 }
 
