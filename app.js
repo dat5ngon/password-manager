@@ -271,6 +271,14 @@ document.addEventListener('DOMContentLoaded', function() {
     return;
   }
   showLockScreen();
+
+  // Listen for vault creation in another tab -- if this tab is still on the
+  // "Create" screen, switch to unlock mode automatically.
+  window.addEventListener('storage', function(e) {
+    if (e.key === 'pm_salt' && e.newValue && !cryptoKey) {
+      showLockScreen();
+    }
+  });
 });
 
 function showLockScreen() {
@@ -330,6 +338,13 @@ function submitLockScreen() {
       input.focus();
     });
   } else {
+    // Guard: re-check if another tab created the vault while this tab was on the "Create" screen
+    if (isVaultSetup()) {
+      error.textContent = 'A vault was already created (possibly in another tab). Switching to unlock.';
+      btn.disabled = false;
+      showLockScreen();
+      return;
+    }
     if (passphrase !== confirmInput.value) {
       error.textContent = 'Passphrases do not match.';
       btn.disabled = false;
