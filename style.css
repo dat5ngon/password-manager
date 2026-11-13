@@ -36,8 +36,14 @@ body {
   background: var(--bg-deep);
   color: var(--text);
   min-height: 100vh;
+  min-height: -webkit-fill-available;
   line-height: 1.6;
   -webkit-font-smoothing: antialiased;
+  -webkit-text-size-adjust: 100%;
+}
+
+html {
+  height: -webkit-fill-available;
 }
 
 .app {
@@ -199,9 +205,11 @@ header p {
   border-radius: var(--radius);
   color: var(--text);
   font-family: 'Space Grotesk', sans-serif;
-  font-size: 14px;
+  font-size: 16px;
   outline: none;
   transition: all 0.25s;
+  -webkit-appearance: none;
+  appearance: none;
 }
 
 .form-group input:focus {
@@ -226,6 +234,8 @@ header p {
   cursor: pointer;
   transition: all 0.25s ease;
   display: inline-flex;
+  -webkit-appearance: none;
+  appearance: none;
   align-items: center;
   gap: 6px;
 }
@@ -297,11 +307,13 @@ header p {
   outline: none;
   color: var(--accent-light);
   font-family: 'JetBrains Mono', monospace;
-  font-size: 15px;
+  font-size: 16px;
   letter-spacing: 1px;
   padding: 0;
   min-width: 0;
   width: 100%;
+  -webkit-appearance: none;
+  appearance: none;
 }
 
 .password-display .pw-input::placeholder {
@@ -476,8 +488,12 @@ header p {
 .modal-overlay {
   display: none;
   position: fixed;
-  inset: 0;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
   background: rgba(0, 0, 0, 0.7);
+  -webkit-backdrop-filter: blur(3px);
   backdrop-filter: blur(3px);
   z-index: 900;
   align-items: center;
@@ -524,9 +540,11 @@ header p {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   color: var(--text);
-  font-size: 13px;
+  font-size: 16px;
   outline: none;
   transition: all 0.25s;
+  -webkit-appearance: none;
+  appearance: none;
 }
 
 .search-bar input:focus {
@@ -582,24 +600,6 @@ header p {
 ::-webkit-scrollbar-track { background: var(--bg-deep); }
 ::-webkit-scrollbar-thumb { background: var(--border-light); border-radius: 2px; }
 
-/* ── Mobile ── */
-@media (max-width: 600px) {
-  .form-row { grid-template-columns: 1fr; }
-  .policy-grid { grid-template-columns: 1fr; }
-  .complexity-checks { grid-template-columns: 1fr; }
-  .tab-btn { padding: 9px 8px; font-size: 12px; }
-  header h1 { font-size: 26px; }
-  .app { padding: 20px 12px; padding-top: max(20px, env(safe-area-inset-top)); }
-
-  .lock-screen { padding: 16px; padding-top: max(16px, env(safe-area-inset-top)); }
-  .lock-card { padding: 28px 20px; }
-  .lock-icon { font-size: 36px; margin-bottom: 12px; }
-  .lock-heading { font-size: 20px; }
-  .lock-subtitle { font-size: 12px; margin-bottom: 18px; }
-  .lock-security { font-size: 10px; }
-  .lock-credit { font-size: 9px; }
-}
-
 ::selection {
   background: var(--accent-dim);
   color: var(--accent-light);
@@ -607,22 +607,31 @@ header p {
 
 /* ── Lock Screen ── */
 .lock-screen {
+  display: -webkit-flex;
   display: flex;
+  -webkit-align-items: center;
   align-items: center;
+  -webkit-justify-content: center;
   justify-content: center;
   min-height: 100vh;
+  min-height: 100dvh;
+  min-height: -webkit-fill-available;
   padding: 20px;
+  padding-bottom: max(20px, env(safe-area-inset-bottom));
 }
 
 .lock-card {
   background: var(--surface);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-light);
   border-radius: var(--radius-lg);
   padding: 40px 32px;
   width: 100%;
   max-width: 400px;
   text-align: center;
   animation: modalIn 0.4s ease;
+  -webkit-transform: translateZ(0);
+  transform: translateZ(0);
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
 }
 
 .lock-icon {
@@ -641,7 +650,7 @@ header p {
 
 .lock-subtitle {
   font-size: 13px;
-  color: var(--text-dim);
+  color: var(--text-muted);
   margin-bottom: 24px;
   line-height: 1.5;
 }
@@ -654,13 +663,15 @@ header p {
   width: 100%;
   padding: 12px 14px;
   background: var(--bg-deep);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-light);
   border-radius: var(--radius);
   color: var(--text);
   font-family: 'Space Grotesk', sans-serif;
-  font-size: 14px;
+  font-size: 16px;
   outline: none;
   transition: all 0.25s;
+  -webkit-appearance: none;
+  appearance: none;
 }
 
 .lock-card .form-group input:focus {
@@ -704,4 +715,22 @@ header p {
   text-align: center;
   margin-top: 12px;
   opacity: 0.6;
+}
+
+/* ── Mobile ── */
+@media (max-width: 600px) {
+  .form-row { grid-template-columns: 1fr; }
+  .policy-grid { grid-template-columns: 1fr; }
+  .complexity-checks { grid-template-columns: 1fr; }
+  .tab-btn { padding: 9px 8px; font-size: 12px; }
+  header h1 { font-size: 26px; }
+  .app { padding: 20px 12px; padding-top: max(20px, env(safe-area-inset-top)); }
+
+  .lock-screen { padding: 16px; padding-top: max(16px, env(safe-area-inset-top)); }
+  .lock-card { padding: 28px 20px; }
+  .lock-icon { font-size: 36px; margin-bottom: 12px; }
+  .lock-heading { font-size: 20px; }
+  .lock-subtitle { font-size: 12px; margin-bottom: 18px; }
+  .lock-security { font-size: 10px; }
+  .lock-credit { font-size: 9px; }
 }
