@@ -88,6 +88,81 @@ header p {
   text-transform: uppercase;
 }
 
+.about-link {
+  position: absolute;
+  top: 0;
+  right: 0;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  color: var(--text-dim);
+  text-decoration: none;
+  letter-spacing: 1px;
+  padding: 4px 0;
+  transition: color 0.25s;
+}
+
+.about-link:hover {
+  color: var(--accent-light);
+}
+
+.about-section {
+  margin-bottom: 18px;
+}
+
+.about-section:last-child {
+  margin-bottom: 0;
+}
+
+.about-section h3 {
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  margin-bottom: 8px;
+}
+
+.about-section p,
+.about-section li {
+  font-size: 13px;
+  color: var(--text);
+  line-height: 1.7;
+}
+
+.about-section ul {
+  list-style: none;
+  padding: 0;
+}
+
+.about-section li {
+  padding: 3px 0;
+  padding-left: 16px;
+  position: relative;
+}
+
+.about-section li::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 11px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+  opacity: 0.6;
+}
+
+.about-version {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  color: var(--text-dim);
+  text-align: center;
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
 /* ── Tabs ── */
 .tabs {
   display: flex;

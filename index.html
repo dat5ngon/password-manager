@@ -12,6 +12,7 @@
 </head>
 <body>
 <div class="app">
+  <a href="#" class="about-link" onclick="showAboutDialog(); return false;">about</a>
   <header>
     <h1>password <span class="accent">manager</span></h1>
     <p>secure password generation &amp; management system</p>
@@ -58,6 +59,7 @@
       <div class="strength-label" id="strength-label"></div>
       <div class="complexity-checks" id="complexity-checks"></div>
 
+      <div id="save-validation"></div>
       <div class="btn-group" style="margin-top:14px;">
         <button class="btn btn-primary" onclick="saveAccount()">save account</button>
         <button class="btn btn-outline" onclick="validateManualPassword()">validate</button>

@@ -340,7 +340,7 @@ function updateChecks(pw, accountName) {
   for (var j = 0; j < checks.length; j++) {
     var c = checks[j];
     html += '<div class="check-item ' + (c.pass ? 'pass' : 'fail') + '">' +
-      '<span class="check-icon">' + (c.pass ? '&#10003;' : '&#10007;') + '</span>' +
+      '<span class="check-icon"></span>' +
       escHtml(c.label) + '</div>';
   }
   document.getElementById('complexity-checks').innerHTML = html;
@@ -361,7 +361,7 @@ function saveAccount() {
   if (!v.valid) {
     showToast(v.errors[0], 'error');
     document.getElementById('save-validation').innerHTML =
-      '<div style="color:var(--danger);font-size:13px;margin-top:8px;">' +
+      '<div style="color:var(--red);font-size:13px;margin-top:8px;">' +
       v.errors.map(function(e){ return '&#10060; ' + escHtml(e); }).join('<br>') + '</div>';
     return;
   }
@@ -461,9 +461,9 @@ function showAccountDetail(id) {
   var age = getPasswordAge(a);
   var daysLeft = policy.maxAge - age.days;
   var statusHtml;
-  if (daysLeft <= 0) statusHtml = '<span style="color:var(--danger);">EXPIRED ' + Math.abs(daysLeft) + ' days ago</span>';
-  else if (daysLeft <= Math.ceil(policy.maxAge * 0.2)) statusHtml = '<span style="color:var(--warning);">Expires in ' + daysLeft + ' days</span>';
-  else statusHtml = '<span style="color:var(--success);">' + daysLeft + ' days remaining</span>';
+  if (daysLeft <= 0) statusHtml = '<span style="color:var(--red);">EXPIRED ' + Math.abs(daysLeft) + ' days ago</span>';
+  else if (daysLeft <= Math.ceil(policy.maxAge * 0.2)) statusHtml = '<span style="color:var(--amber);">Expires in ' + daysLeft + ' days</span>';
+  else statusHtml = '<span style="color:var(--accent-light);">' + daysLeft + ' days remaining</span>';
 
   var masked = a.password.replace(/./g, '\u2022');
 
@@ -547,6 +547,32 @@ function changePasswordFor(id) {
 
 function closeModal() {
   document.getElementById('modal-overlay').classList.remove('active');
+}
+
+function showAboutDialog() {
+  var html = '<h2>About</h2>' +
+    '<div class="about-section">' +
+      '<h3>Credit</h3>' +
+      '<p>&copy; dat5ngon 2026</p>' +
+      '<p style="color:var(--text-dim);font-size:12px;margin-top:4px;">A lightweight, zero-dependency password manager that runs entirely in your browser.</p>' +
+    '</div>' +
+    '<div class="about-section">' +
+      '<h3>Security Notes</h3>' +
+      '<ul>' +
+        '<li>All data stays in your browser\'s localStorage -- nothing is transmitted to any server</li>' +
+        '<li>Password generation uses <code style="font-family:JetBrains Mono,monospace;font-size:12px;color:var(--accent-light);background:var(--surface2);padding:1px 5px;border-radius:3px;">crypto.getRandomValues()</code> (cryptographically secure)</li>' +
+        '<li>No external dependencies -- zero network requests after page load</li>' +
+        '<li>Export files contain plaintext passwords -- store them securely</li>' +
+        '<li>Each browser and device has independent data storage</li>' +
+      '</ul>' +
+    '</div>' +
+    '<div class="about-version">password manager v1.0</div>' +
+    '<div class="btn-group" style="margin-top:16px;justify-content:flex-end;">' +
+      '<button class="btn btn-outline btn-sm" onclick="closeModal()">Close</button>' +
+    '</div>';
+
+  document.getElementById('modal-content').innerHTML = html;
+  document.getElementById('modal-overlay').classList.add('active');
 }
 
 function closeModalOnBackdrop(e) {
