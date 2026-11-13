@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Password Manager</title>
+<meta name="description" content="Generate, manage, and track passwords with configurable policies">
+<meta name="theme-color" content="#111111">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app">
+  <header>
+    <h1>password <span class="accent">manager</span></h1>
+    <p>secure password generation &amp; management system</p>
+  </header>
+
+  <div class="tabs">
+    <button class="tab-btn active" data-tab="generator">Generator</button>
+    <button class="tab-btn" data-tab="accounts">Accounts</button>
+    <button class="tab-btn" data-tab="policy">Policy</button>
+  </div>
+
+  <!-- Generator Tab -->
+  <div id="tab-generator" class="tab-content active">
+    <div class="card">
+      <h2><span class="indicator"></span> Password Generator</h2>
+
+      <div class="form-row">
+        <div class="form-group">
+          <label>Service Name</label>
+          <input type="text" id="save-account" placeholder="e.g. Gmail, GitHub">
+        </div>
+        <div class="form-group">
+          <label>Username / Email</label>
+          <input type="text" id="save-username" placeholder="e.g. john@example.com">
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label>Account Name (for restriction check)</label>
+        <input type="text" id="gen-account" placeholder="e.g. john.doe or admin">
+      </div>
+
+      <div class="form-group">
+        <label>Password</label>
+        <div class="password-display">
+          <input type="text" class="pw-input" id="save-password" placeholder="click generate or type manually" oninput="onPasswordInput()">
+          <div class="btn-group">
+            <button class="btn btn-outline btn-sm" onclick="copyPassword()" title="Copy">copy</button>
+            <button class="btn btn-primary btn-sm" onclick="generatePassword()">generate</button>
+          </div>
+        </div>
+      </div>
+      <div class="strength-meter"><div class="fill" id="strength-fill"></div></div>
+      <div class="strength-label" id="strength-label"></div>
+      <div class="complexity-checks" id="complexity-checks"></div>
+
+      <div class="btn-group" style="margin-top:14px;">
+        <button class="btn btn-primary" onclick="saveAccount()">save account</button>
+        <button class="btn btn-outline" onclick="validateManualPassword()">validate</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Accounts Tab -->
+  <div id="tab-accounts" class="tab-content">
+    <div class="search-bar">
+      <input type="text" id="search-accounts" placeholder="Search accounts..." oninput="renderAccounts()">
+    </div>
+    <div id="accounts-list"></div>
+  </div>
+
+  <!-- Policy Tab -->
+  <div id="tab-policy" class="tab-content">
+    <div class="card">
+      <h2><span class="indicator"></span> Policy Configuration</h2>
+      <p style="color:var(--text-dim);font-size:12px;margin-bottom:16px;">
+        Configure password requirements. Changes apply immediately.
+      </p>
+      <div class="policy-grid">
+        <div class="form-group">
+          <label>Max Password Age (days)</label>
+          <input type="number" id="policy-max-age" min="1" max="365">
+        </div>
+        <div class="form-group">
+          <label>Min Password Age (days)</label>
+          <input type="number" id="policy-min-age" min="0" max="30">
+        </div>
+        <div class="form-group">
+          <label>Min Password Length</label>
+          <input type="number" id="policy-min-length" min="8" max="128">
+        </div>
+        <div class="form-group">
+          <label>History Count (cannot reuse last N)</label>
+          <input type="number" id="policy-history" min="1" max="24">
+        </div>
+      </div>
+      <div class="form-group" style="margin-top:8px;">
+        <label style="display:flex;align-items:center;gap:10px;cursor:pointer;">
+          <input type="checkbox" id="policy-complexity" style="width:auto;accent-color:var(--accent);">
+          <span>Require complexity (3 of 4 character categories)</span>
+        </label>
+      </div>
+      <div class="btn-group" style="margin-top:16px;">
+        <button class="btn btn-primary" onclick="savePolicy()">save policy</button>
+        <button class="btn btn-outline" onclick="resetPolicy()">reset defaults</button>
+      </div>
+    </div>
+    <div class="card">
+      <h2><span class="indicator"></span> Data Management</h2>
+      <p style="color:var(--text-dim);font-size:12px;margin-bottom:12px;">
+        All data stored in browser localStorage. Export for backup.
+      </p>
+      <div class="data-actions">
+        <button class="btn btn-outline" onclick="exportData()">export</button>
+        <button class="btn btn-outline" onclick="document.getElementById('import-file').click()">import</button>
+        <input type="file" id="import-file" accept=".json" style="display:none" onchange="importData(event)">
+        <button class="btn btn-danger btn-sm" onclick="clearAllData()">clear all</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Modal -->
+<div class="modal-overlay" id="modal-overlay" onclick="closeModalOnBackdrop(event)">
+  <div class="modal" id="modal-content"></div>
+</div>
+
+<!-- Toasts -->
+<div class="toast-container" id="toast-container"></div>
+
+<script src="app.js"></script>
+</body>
+</html>
