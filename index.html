@@ -11,8 +11,35 @@
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<div class="app">
-  <a href="#" class="about-link" onclick="showAboutDialog(); return false;">about</a>
+
+<!-- Lock Screen -->
+<div id="lock-screen" class="lock-screen">
+  <div class="lock-card">
+    <div class="lock-icon">&#128272;</div>
+    <h1 class="lock-heading" id="lock-title">Unlock Vault</h1>
+    <p class="lock-subtitle" id="lock-subtitle">Enter your master passphrase to access your passwords.</p>
+    <div class="form-group">
+      <label>Master Passphrase</label>
+      <input type="password" id="lock-passphrase" placeholder="Enter passphrase..." onkeydown="onLockKeydown(event)" autocomplete="off">
+    </div>
+    <div class="form-group" id="lock-confirm-group" style="display:none;">
+      <label>Confirm Passphrase</label>
+      <input type="password" id="lock-confirm" placeholder="Confirm passphrase..." onkeydown="onLockKeydown(event)" autocomplete="off">
+    </div>
+    <div class="lock-error" id="lock-error"></div>
+    <button class="btn btn-primary" id="lock-btn" onclick="submitLockScreen()" style="width:100%;margin-top:8px;">unlock</button>
+    <div class="lock-footer">
+      <div class="lock-security">
+        <p>AES-256-GCM encryption &bull; PBKDF2 key derivation</p>
+        <p>All data stays in your browser &bull; zero network requests</p>
+      </div>
+      <div class="lock-credit">&copy; dat5ngon 2026 &bull; password manager v1.1</div>
+    </div>
+  </div>
+</div>
+
+<!-- Main App (hidden until unlocked) -->
+<div id="app-main" class="app" style="display:none;">
   <header>
     <h1>password <span class="accent">manager</span></h1>
     <p>secure password generation &amp; management system</p>
@@ -99,6 +126,10 @@
           <label>History Count (cannot reuse last N)</label>
           <input type="number" id="policy-history" min="1" max="24">
         </div>
+        <div class="form-group">
+          <label>Auto-Lock (minutes, 0 = off)</label>
+          <input type="number" id="policy-auto-lock" min="0" max="60">
+        </div>
       </div>
       <div class="form-group" style="margin-top:8px;">
         <label style="display:flex;align-items:center;gap:10px;cursor:pointer;">
@@ -120,6 +151,7 @@
         <button class="btn btn-outline" onclick="exportData()">export</button>
         <button class="btn btn-outline" onclick="document.getElementById('import-file').click()">import</button>
         <input type="file" id="import-file" accept=".json" style="display:none" onchange="importData(event)">
+        <button class="btn btn-outline" onclick="showChangePassphraseDialog()">change passphrase</button>
         <button class="btn btn-danger btn-sm" onclick="clearAllData()">clear all</button>
       </div>
     </div>

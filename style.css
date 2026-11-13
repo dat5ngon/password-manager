@@ -88,80 +88,7 @@ header p {
   text-transform: uppercase;
 }
 
-.about-link {
-  position: absolute;
-  top: 0;
-  right: 0;
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 10px;
-  color: var(--text-dim);
-  text-decoration: none;
-  letter-spacing: 1px;
-  padding: 4px 0;
-  transition: color 0.25s;
-}
 
-.about-link:hover {
-  color: var(--accent-light);
-}
-
-.about-section {
-  margin-bottom: 18px;
-}
-
-.about-section:last-child {
-  margin-bottom: 0;
-}
-
-.about-section h3 {
-  font-family: 'Space Grotesk', sans-serif;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 1px;
-  margin-bottom: 8px;
-}
-
-.about-section p,
-.about-section li {
-  font-size: 13px;
-  color: var(--text);
-  line-height: 1.7;
-}
-
-.about-section ul {
-  list-style: none;
-  padding: 0;
-}
-
-.about-section li {
-  padding: 3px 0;
-  padding-left: 16px;
-  position: relative;
-}
-
-.about-section li::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 11px;
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: var(--accent);
-  opacity: 0.6;
-}
-
-.about-version {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 10px;
-  color: var(--text-dim);
-  text-align: center;
-  margin-top: 16px;
-  padding-top: 12px;
-  border-top: 1px solid var(--border);
-}
 
 /* ── Tabs ── */
 .tabs {
@@ -668,4 +595,105 @@ header p {
 ::selection {
   background: var(--accent-dim);
   color: var(--accent-light);
+}
+
+/* ── Lock Screen ── */
+.lock-screen {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 20px;
+}
+
+.lock-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 40px 32px;
+  width: 100%;
+  max-width: 400px;
+  text-align: center;
+  animation: modalIn 0.4s ease;
+}
+
+.lock-icon {
+  font-size: 48px;
+  margin-bottom: 16px;
+  opacity: 0.7;
+}
+
+.lock-heading {
+  font-family: 'Playfair Display', serif;
+  font-size: 24px;
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: 8px;
+}
+
+.lock-subtitle {
+  font-size: 13px;
+  color: var(--text-dim);
+  margin-bottom: 24px;
+  line-height: 1.5;
+}
+
+.lock-card .form-group {
+  text-align: left;
+}
+
+.lock-card .form-group input {
+  width: 100%;
+  padding: 12px 14px;
+  background: var(--bg-deep);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 14px;
+  outline: none;
+  transition: all 0.25s;
+}
+
+.lock-card .form-group input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-dim);
+}
+
+.lock-card .form-group input::placeholder {
+  color: var(--text-dim);
+}
+
+.lock-error {
+  color: var(--red);
+  font-size: 13px;
+  min-height: 20px;
+  margin-top: 8px;
+}
+
+/* ── Lock Screen Footer ── */
+.lock-footer {
+  margin-top: 24px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.lock-security {
+  font-size: 11px;
+  color: var(--text-dim);
+  line-height: 1.6;
+  text-align: center;
+}
+
+.lock-security p {
+  margin: 2px 0;
+}
+
+.lock-credit {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  color: var(--text-dim);
+  text-align: center;
+  margin-top: 12px;
+  opacity: 0.6;
 }

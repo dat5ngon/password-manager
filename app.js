@@ -1,5 +1,5 @@
 // ── Defaults ──
-var DEFAULT_POLICY = { maxAge:180, minAge:2, minLength:16, complexity:true, historyCount:5 };
+var DEFAULT_POLICY = { maxAge:180, minAge:2, minLength:16, complexity:true, historyCount:5, autoLockMinutes:5 };
 
 // ── Word lists for memorable passwords ──
 var ADVERBS = [
@@ -63,17 +63,298 @@ var NOUNS = [
   'wizard','zenith','zephyr'
 ];
 
-// Leet-speak substitution map: original char -> replacement
+// Leet-speak substitution map
 var LEET_MAP = {
   's': '$', 'e': '3', 'o': '0', 'g': '9',
   'a': '@', 'i': '!', 'S': '$', 'H': '#'
 };
 
-var policy = loadPolicy();
-var accounts = loadAccounts();
+// Verification sentinel -- encrypted with the master key to verify passphrase
+var VERIFY_SENTINEL = 'pm-vault-ok-2026';
 
-// ── Init ──
+var policy = loadPolicy();
+var accounts = [];
+var cryptoKey = null; // AES-GCM key derived from master passphrase, held in memory only
+var autoLockTimer = null; // inactivity timer ID
+
+// ══════════════════════════════════════════════════════════════
+//  Crypto helpers (PBKDF2 + AES-GCM)
+// ══════════════════════════════════════════════════════════════
+
+function deriveKey(passphrase, salt) {
+  var enc = new TextEncoder();
+  return crypto.subtle.importKey('raw', enc.encode(passphrase), 'PBKDF2', false, ['deriveKey'])
+    .then(function(baseKey) {
+      return crypto.subtle.deriveKey(
+        { name: 'PBKDF2', salt: salt, iterations: 100000, hash: 'SHA-256' },
+        baseKey,
+        { name: 'AES-GCM', length: 256 },
+        false,
+        ['encrypt', 'decrypt']
+      );
+    });
+}
+
+function encryptText(plaintext, key) {
+  var enc = new TextEncoder();
+  var iv = crypto.getRandomValues(new Uint8Array(12));
+  return crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv }, key, enc.encode(plaintext))
+    .then(function(cipherBuf) {
+      var combined = new Uint8Array(iv.length + cipherBuf.byteLength);
+      combined.set(iv, 0);
+      combined.set(new Uint8Array(cipherBuf), iv.length);
+      return arrayToBase64(combined);
+    });
+}
+
+function decryptText(base64, key) {
+  var bytes = base64ToArray(base64);
+  var iv = bytes.slice(0, 12);
+  var ciphertext = bytes.slice(12);
+  return crypto.subtle.decrypt({ name: 'AES-GCM', iv: iv }, key, ciphertext)
+    .then(function(plainBuf) {
+      return new TextDecoder().decode(plainBuf);
+    });
+}
+
+function arrayToBase64(arr) {
+  var binary = '';
+  for (var i = 0; i < arr.length; i++) binary += String.fromCharCode(arr[i]);
+  return btoa(binary);
+}
+
+function base64ToArray(base64) {
+  var binary = atob(base64);
+  var bytes = new Uint8Array(binary.length);
+  for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+// ══════════════════════════════════════════════════════════════
+//  Vault setup, unlock, lock
+// ══════════════════════════════════════════════════════════════
+
+function isVaultSetup() {
+  return localStorage.getItem('pm_salt') !== null && localStorage.getItem('pm_verify') !== null;
+}
+
+function setupVault(passphrase) {
+  var salt = crypto.getRandomValues(new Uint8Array(16));
+  var saltB64 = arrayToBase64(salt);
+  return deriveKey(passphrase, salt).then(function(key) {
+    return encryptText(VERIFY_SENTINEL, key).then(function(verifyToken) {
+      localStorage.setItem('pm_salt', saltB64);
+      localStorage.setItem('pm_verify', verifyToken);
+      cryptoKey = key;
+      return migrateExistingAccounts();
+    });
+  });
+}
+
+function unlockVault(passphrase) {
+  var saltB64 = localStorage.getItem('pm_salt');
+  var verifyToken = localStorage.getItem('pm_verify');
+  if (!saltB64 || !verifyToken) return Promise.reject(new Error('Vault not set up'));
+  var salt = base64ToArray(saltB64);
+  return deriveKey(passphrase, salt).then(function(key) {
+    return decryptText(verifyToken, key).then(function(plain) {
+      if (plain !== VERIFY_SENTINEL) return Promise.reject(new Error('Wrong passphrase'));
+      cryptoKey = key;
+      return loadAndDecryptAccounts();
+    });
+  });
+}
+
+function encryptPassword(pw) {
+  if (!cryptoKey) return Promise.reject(new Error('Vault locked'));
+  return encryptText(pw, cryptoKey);
+}
+
+function decryptPassword(encPw) {
+  if (!cryptoKey) return Promise.reject(new Error('Vault locked'));
+  return decryptText(encPw, cryptoKey);
+}
+
+// Load raw account data from localStorage and decrypt all password fields
+function loadAndDecryptAccounts() {
+  var raw;
+  try {
+    var s = localStorage.getItem('pm_accounts');
+    raw = s ? JSON.parse(s) : [];
+  } catch(e) {
+    raw = [];
+  }
+  if (raw.length === 0) { accounts = []; return Promise.resolve(); }
+
+  var promises = raw.map(function(a) {
+    var pwPromise = a.password
+      ? decryptPassword(a.password).catch(function() { return a.password; })
+      : Promise.resolve('');
+    var histPromises = (a.passwordHistory || []).map(function(h) {
+      return h.password
+        ? decryptPassword(h.password).catch(function() { return h.password; })
+        : Promise.resolve('');
+    });
+    return Promise.all([pwPromise, Promise.all(histPromises)]).then(function(results) {
+      a.password = results[0];
+      var decryptedHist = results[1];
+      (a.passwordHistory || []).forEach(function(h, idx) {
+        h.password = decryptedHist[idx];
+      });
+      return a;
+    });
+  });
+
+  return Promise.all(promises).then(function(decrypted) {
+    accounts = decrypted;
+  });
+}
+
+// Encrypt all password fields and persist to localStorage
+function persistAccounts() {
+  if (!cryptoKey) return Promise.resolve();
+
+  var promises = accounts.map(function(a) {
+    var copy = Object.assign({}, a);
+    var pwPromise = encryptPassword(a.password);
+    var histPromises = (a.passwordHistory || []).map(function(h) {
+      return encryptPassword(h.password).then(function(enc) {
+        return { password: enc, date: h.date };
+      });
+    });
+    return Promise.all([pwPromise, Promise.all(histPromises)]).then(function(results) {
+      copy.password = results[0];
+      copy.passwordHistory = results[1];
+      return copy;
+    });
+  });
+
+  return Promise.all(promises).then(function(encrypted) {
+    localStorage.setItem('pm_accounts', JSON.stringify(encrypted));
+  });
+}
+
+// Migrate plaintext accounts (pre-vault) to encrypted
+function migrateExistingAccounts() {
+  var raw;
+  try {
+    var s = localStorage.getItem('pm_accounts');
+    raw = s ? JSON.parse(s) : [];
+  } catch(e) {
+    raw = [];
+  }
+  if (raw.length === 0) return Promise.resolve();
+
+  // Heuristic: encrypted passwords are long base64 strings (>40 chars)
+  var firstPw = raw[0].password || '';
+  if (firstPw.length > 40 && /^[A-Za-z0-9+/=]+$/.test(firstPw)) {
+    return loadAndDecryptAccounts();
+  }
+
+  // Plaintext -- load into memory then re-persist encrypted
+  accounts = raw;
+  return persistAccounts();
+}
+
+// ══════════════════════════════════════════════════════════════
+//  Lock screen
+// ══════════════════════════════════════════════════════════════
+
 document.addEventListener('DOMContentLoaded', function() {
+  // crypto.subtle requires a secure context (HTTPS or localhost)
+  if (!crypto.subtle) {
+    document.getElementById('lock-screen').style.display = 'flex';
+    document.getElementById('app-main').style.display = 'none';
+    document.getElementById('lock-error').textContent =
+      'Encryption requires HTTPS or localhost. Serve this page via a local server (e.g. npx serve) or access via localhost.';
+    document.getElementById('lock-btn').disabled = true;
+    return;
+  }
+  showLockScreen();
+});
+
+function showLockScreen() {
+  document.getElementById('lock-screen').style.display = 'flex';
+  document.getElementById('app-main').style.display = 'none';
+
+  var setup = isVaultSetup();
+  var title = document.getElementById('lock-title');
+  var subtitle = document.getElementById('lock-subtitle');
+  var input = document.getElementById('lock-passphrase');
+  var confirmGroup = document.getElementById('lock-confirm-group');
+  var confirmInput = document.getElementById('lock-confirm');
+  var btn = document.getElementById('lock-btn');
+  var error = document.getElementById('lock-error');
+
+  if (setup) {
+    title.textContent = 'Unlock Vault';
+    subtitle.textContent = 'Enter your master passphrase to access your passwords.';
+    confirmGroup.style.display = 'none';
+    btn.textContent = 'unlock';
+  } else {
+    title.textContent = 'Create Master Passphrase';
+    subtitle.textContent = 'Set a master passphrase to encrypt all stored passwords. Do not forget it, there is no recovery.';
+    confirmGroup.style.display = 'block';
+    btn.textContent = 'create vault';
+  }
+
+  input.value = '';
+  if (confirmInput) confirmInput.value = '';
+  error.textContent = '';
+  setTimeout(function() { input.focus(); }, 100);
+}
+
+function submitLockScreen() {
+  var input = document.getElementById('lock-passphrase');
+  var confirmInput = document.getElementById('lock-confirm');
+  var error = document.getElementById('lock-error');
+  var btn = document.getElementById('lock-btn');
+  var passphrase = input.value;
+
+  if (!passphrase) { error.textContent = 'Passphrase is required.'; return; }
+  if (passphrase.length < 8) { error.textContent = 'Passphrase must be at least 8 characters.'; return; }
+
+  btn.disabled = true;
+  btn.textContent = 'working...';
+  error.textContent = '';
+
+  if (isVaultSetup()) {
+    unlockVault(passphrase).then(function() {
+      onVaultUnlocked();
+    }).catch(function(err) {
+      error.textContent = 'Wrong passphrase. Try again.';
+      console.error('Unlock failed:', err);
+      btn.disabled = false;
+      btn.textContent = 'unlock';
+      input.value = '';
+      input.focus();
+    });
+  } else {
+    if (passphrase !== confirmInput.value) {
+      error.textContent = 'Passphrases do not match.';
+      btn.disabled = false;
+      btn.textContent = 'create vault';
+      return;
+    }
+    setupVault(passphrase).then(function() {
+      onVaultUnlocked();
+    }).catch(function(err) {
+      error.textContent = 'Failed to create vault: ' + (err.message || err);
+      console.error('Setup failed:', err);
+      btn.disabled = false;
+      btn.textContent = 'create vault';
+    });
+  }
+}
+
+function onLockKeydown(e) {
+  if (e.key === 'Enter') submitLockScreen();
+}
+
+function onVaultUnlocked() {
+  document.getElementById('lock-screen').style.display = 'none';
+  document.getElementById('app-main').style.display = 'block';
+
   populatePolicyForm();
   renderAccounts();
   document.querySelectorAll('.tab-btn').forEach(function(btn) {
@@ -85,18 +366,116 @@ document.addEventListener('DOMContentLoaded', function() {
       if (btn.dataset.tab === 'accounts') renderAccounts();
     });
   });
-});
+  startAutoLockTimer();
+}
 
-// ── Storage ──
+function lockVault() {
+  stopAutoLockTimer();
+  cryptoKey = null;
+  accounts = [];
+  showLockScreen();
+}
+
+// ── Auto-lock on inactivity ──
+function startAutoLockTimer() {
+  stopAutoLockTimer();
+  var minutes = policy.autoLockMinutes;
+  if (!minutes || minutes <= 0) return; // 0 = disabled
+  autoLockTimer = setTimeout(function() {
+    if (cryptoKey) {
+      lockVault();
+      showToast('Vault locked due to inactivity', 'warning');
+    }
+  }, minutes * 60 * 1000);
+  // Reset timer on user activity
+  ['click', 'keydown', 'mousemove', 'scroll', 'touchstart'].forEach(function(evt) {
+    document.addEventListener(evt, resetAutoLockTimer, { passive: true });
+  });
+}
+
+function resetAutoLockTimer() {
+  if (!cryptoKey) return; // vault already locked
+  stopAutoLockTimer();
+  startAutoLockTimer();
+}
+
+function stopAutoLockTimer() {
+  if (autoLockTimer) {
+    clearTimeout(autoLockTimer);
+    autoLockTimer = null;
+  }
+  ['click', 'keydown', 'mousemove', 'scroll', 'touchstart'].forEach(function(evt) {
+    document.removeEventListener(evt, resetAutoLockTimer);
+  });
+}
+
+// ── Change master passphrase (modal dialog) ──
+function showChangePassphraseDialog() {
+  var html = '<h2>Change Master Passphrase</h2>' +
+    '<p style="color:var(--text-dim);font-size:12px;margin-bottom:16px;">Re-encrypts all stored passwords with a new passphrase.</p>' +
+    '<div class="form-group"><label>Current Passphrase</label>' +
+      '<input type="password" id="change-current-pass" placeholder="Enter current passphrase..." autocomplete="off"></div>' +
+    '<div class="form-group"><label>New Passphrase</label>' +
+      '<input type="password" id="change-new-pass" placeholder="Min 8 characters..." autocomplete="off"></div>' +
+    '<div class="form-group"><label>Confirm New Passphrase</label>' +
+      '<input type="password" id="change-confirm-pass" placeholder="Confirm new passphrase..." autocomplete="off"></div>' +
+    '<div id="change-pass-error" style="color:var(--red);font-size:13px;min-height:20px;margin-bottom:8px;"></div>' +
+    '<div class="btn-group">' +
+      '<button class="btn btn-primary" onclick="changePassphrase()">change passphrase</button>' +
+      '<button class="btn btn-outline" onclick="closeModal()">cancel</button>' +
+    '</div>';
+  document.getElementById('modal-content').innerHTML = html;
+  document.getElementById('modal-overlay').classList.add('active');
+  setTimeout(function() { document.getElementById('change-current-pass').focus(); }, 100);
+}
+
+function changePassphrase() {
+  var errorEl = document.getElementById('change-pass-error');
+  var currentPass = document.getElementById('change-current-pass').value;
+  var newPass = document.getElementById('change-new-pass').value;
+  var confirmPass = document.getElementById('change-confirm-pass').value;
+
+  errorEl.textContent = '';
+  if (!currentPass) { errorEl.textContent = 'Current passphrase is required.'; return; }
+  if (!newPass) { errorEl.textContent = 'New passphrase is required.'; return; }
+  if (newPass.length < 8) { errorEl.textContent = 'New passphrase must be at least 8 characters.'; return; }
+  if (newPass !== confirmPass) { errorEl.textContent = 'New passphrases do not match.'; return; }
+
+  var saltB64 = localStorage.getItem('pm_salt');
+  var verifyToken = localStorage.getItem('pm_verify');
+  var salt = base64ToArray(saltB64);
+
+  deriveKey(currentPass, salt).then(function(oldKey) {
+    return decryptText(verifyToken, oldKey).then(function(plain) {
+      if (plain !== VERIFY_SENTINEL) return Promise.reject(new Error('Wrong passphrase'));
+      var newSalt = crypto.getRandomValues(new Uint8Array(16));
+      var newSaltB64 = arrayToBase64(newSalt);
+      return deriveKey(newPass, newSalt).then(function(newKey) {
+        return encryptText(VERIFY_SENTINEL, newKey).then(function(newVerify) {
+          localStorage.setItem('pm_salt', newSaltB64);
+          localStorage.setItem('pm_verify', newVerify);
+          cryptoKey = newKey;
+          return persistAccounts();
+        });
+      });
+    });
+  }).then(function() {
+    closeModal();
+    showToast('Master passphrase changed successfully', 'success');
+  }).catch(function(err) {
+    errorEl.textContent = 'Current passphrase is incorrect.';
+    console.error('Change passphrase failed:', err);
+  });
+}
+
+// ══════════════════════════════════════════════════════════════
+//  Policy storage (not encrypted -- no secrets)
+// ══════════════════════════════════════════════════════════════
+
 function loadPolicy() {
   try { var s = localStorage.getItem('pm_policy'); return s ? Object.assign({}, DEFAULT_POLICY, JSON.parse(s)) : Object.assign({}, DEFAULT_POLICY); }
   catch(e) { return Object.assign({}, DEFAULT_POLICY); }
 }
-function loadAccounts() {
-  try { var s = localStorage.getItem('pm_accounts'); return s ? JSON.parse(s) : []; }
-  catch(e) { return []; }
-}
-function persistAccounts() { localStorage.setItem('pm_accounts', JSON.stringify(accounts)); }
 
 function savePolicy() {
   policy = {
@@ -104,9 +483,12 @@ function savePolicy() {
     minAge: parseInt(document.getElementById('policy-min-age').value) || DEFAULT_POLICY.minAge,
     minLength: Math.max(8, parseInt(document.getElementById('policy-min-length').value) || DEFAULT_POLICY.minLength),
     complexity: document.getElementById('policy-complexity').checked,
-    historyCount: parseInt(document.getElementById('policy-history').value) || DEFAULT_POLICY.historyCount
+    historyCount: parseInt(document.getElementById('policy-history').value) || DEFAULT_POLICY.historyCount,
+    autoLockMinutes: parseInt(document.getElementById('policy-auto-lock').value) || 0
   };
   localStorage.setItem('pm_policy', JSON.stringify(policy));
+  // Restart auto-lock timer with new setting
+  if (cryptoKey) startAutoLockTimer();
   showToast('Policy saved', 'success');
 }
 
@@ -123,9 +505,13 @@ function populatePolicyForm() {
   document.getElementById('policy-min-length').value = policy.minLength;
   document.getElementById('policy-history').value = policy.historyCount;
   document.getElementById('policy-complexity').checked = policy.complexity;
+  document.getElementById('policy-auto-lock').value = policy.autoLockMinutes;
 }
 
-// ── Password Generation ──
+// ══════════════════════════════════════════════════════════════
+//  Password Generation
+// ══════════════════════════════════════════════════════════════
+
 function generatePassword() {
   var accountName = document.getElementById('gen-account').value.trim();
   var pw = '', attempts = 0;
@@ -143,7 +529,6 @@ function generatePassword() {
   updateChecks(pw, accountName);
 }
 
-// Called when user types in the password field manually
 function onPasswordInput() {
   var pw = document.getElementById('save-password').value;
   var acct = document.getElementById('gen-account').value.trim() ||
@@ -155,20 +540,16 @@ function onPasswordInput() {
 }
 
 function buildPassword(len) {
-  // Pick one word from each category
   var adverb = ADVERBS[rng(ADVERBS.length)];
   var adjective = ADJECTIVES[rng(ADJECTIVES.length)];
   var noun = NOUNS[rng(NOUNS.length)];
 
-  // Capitalize first letter of each word
   adverb = adverb.charAt(0).toUpperCase() + adverb.slice(1);
   adjective = adjective.charAt(0).toUpperCase() + adjective.slice(1);
   noun = noun.charAt(0).toUpperCase() + noun.slice(1);
 
-  // Combine: AdverbAdjectiveNoun
   var base = adverb + adjective + noun;
 
-  // Separate leet chars into special-producing and digit-producing
   var SPECIAL_LEET = { 's':'$', 'a':'@', 'i':'!', 'S':'$', 'H':'#' };
   var DIGIT_LEET = { 'e':'3', 'o':'0', 'g':'9' };
 
@@ -177,7 +558,6 @@ function buildPassword(len) {
   var hasSpecial = false;
   var hasDigit = false;
 
-  // Apply leet-speak substitutions randomly (~40% chance per eligible char)
   for (var i = 0; i < arr.length; i++) {
     if (leetKeys.indexOf(arr[i]) !== -1 && rng(100) < 40) {
       arr[i] = LEET_MAP[arr[i]];
@@ -186,7 +566,6 @@ function buildPassword(len) {
     }
   }
 
-  // Guarantee at least one special-char substitution
   if (!hasSpecial) {
     var specEligible = [];
     for (var j = 0; j < arr.length; j++) {
@@ -200,7 +579,6 @@ function buildPassword(len) {
     }
   }
 
-  // Guarantee at least one digit substitution
   if (!hasDigit) {
     var digEligible = [];
     for (var k = 0; k < arr.length; k++) {
@@ -215,13 +593,10 @@ function buildPassword(len) {
   }
 
   var pw = arr.join('');
-
-  // If still shorter than required length, append random digits
   var digits = '0123456789';
   while (pw.length < len) {
     pw += digits[rng(digits.length)];
   }
-
   return pw;
 }
 
@@ -237,7 +612,10 @@ function copyPassword() {
   navigator.clipboard.writeText(pw).then(function() { showToast('Copied to clipboard', 'success'); });
 }
 
-// ── Validation ──
+// ══════════════════════════════════════════════════════════════
+//  Validation
+// ══════════════════════════════════════════════════════════════
+
 function validatePassword(password, accountName, history) {
   var errors = [];
   if (password.length < policy.minLength)
@@ -290,7 +668,10 @@ function validateManualPassword() {
   updateChecks(pw, acct);
 }
 
-// ── Strength Meter ──
+// ══════════════════════════════════════════════════════════════
+//  Strength Meter
+// ══════════════════════════════════════════════════════════════
+
 function updateStrength(pw) {
   var fill = document.getElementById('strength-fill');
   var label = document.getElementById('strength-label');
@@ -346,7 +727,10 @@ function updateChecks(pw, accountName) {
   document.getElementById('complexity-checks').innerHTML = html;
 }
 
-// ── Account CRUD ──
+// ══════════════════════════════════════════════════════════════
+//  Account CRUD
+// ══════════════════════════════════════════════════════════════
+
 function saveAccount() {
   var name = document.getElementById('save-account').value.trim();
   var user = document.getElementById('save-username').value.trim();
@@ -534,7 +918,6 @@ function changePasswordFor(id) {
   closeModal();
   var a = accounts.find(function(x){ return x.id === id; });
   if (!a) return;
-  // Switch to generator tab and pre-fill
   document.querySelectorAll('.tab-btn').forEach(function(b){ b.classList.remove('active'); });
   document.querySelectorAll('.tab-content').forEach(function(c){ c.classList.remove('active'); });
   document.querySelector('[data-tab="generator"]').classList.add('active');
@@ -549,39 +932,28 @@ function closeModal() {
   document.getElementById('modal-overlay').classList.remove('active');
 }
 
-function showAboutDialog() {
-  var html = '<h2>About</h2>' +
-    '<div class="about-section">' +
-      '<h3>Credit</h3>' +
-      '<p>&copy; dat5ngon 2026</p>' +
-      '<p style="color:var(--text-dim);font-size:12px;margin-top:4px;">A lightweight, zero-dependency password manager that runs entirely in your browser.</p>' +
-    '</div>' +
-    '<div class="about-section">' +
-      '<h3>Security Notes</h3>' +
-      '<ul>' +
-        '<li>All data stays in your browser\'s localStorage -- nothing is transmitted to any server</li>' +
-        '<li>Password generation uses <code style="font-family:JetBrains Mono,monospace;font-size:12px;color:var(--accent-light);background:var(--surface2);padding:1px 5px;border-radius:3px;">crypto.getRandomValues()</code> (cryptographically secure)</li>' +
-        '<li>No external dependencies -- zero network requests after page load</li>' +
-        '<li>Export files contain plaintext passwords -- store them securely</li>' +
-        '<li>Each browser and device has independent data storage</li>' +
-      '</ul>' +
-    '</div>' +
-    '<div class="about-version">password manager v1.0</div>' +
-    '<div class="btn-group" style="margin-top:16px;justify-content:flex-end;">' +
-      '<button class="btn btn-outline btn-sm" onclick="closeModal()">Close</button>' +
-    '</div>';
-
-  document.getElementById('modal-content').innerHTML = html;
-  document.getElementById('modal-overlay').classList.add('active');
-}
-
 function closeModalOnBackdrop(e) {
   if (e.target === document.getElementById('modal-overlay')) closeModal();
 }
 
 // ── Export / Import ──
 function exportData() {
-  var data = { policy: policy, accounts: accounts, exportDate: new Date().toISOString() };
+  // Export uses the already-encrypted data from localStorage directly
+  var rawAccounts;
+  try {
+    var s = localStorage.getItem('pm_accounts');
+    rawAccounts = s ? JSON.parse(s) : [];
+  } catch(e) {
+    rawAccounts = [];
+  }
+  var data = {
+    policy: policy,
+    accounts: rawAccounts,
+    encrypted: true,
+    salt: localStorage.getItem('pm_salt'),
+    verify: localStorage.getItem('pm_verify'),
+    exportDate: new Date().toISOString()
+  };
   var blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
   var url = URL.createObjectURL(blob);
   var link = document.createElement('a');
@@ -589,7 +961,7 @@ function exportData() {
   link.download = 'password-manager-backup-' + new Date().toISOString().slice(0,10) + '.json';
   link.click();
   URL.revokeObjectURL(url);
-  showToast('Data exported', 'success');
+  showToast('Data exported (passwords encrypted)', 'success');
 }
 
 function importData(event) {
@@ -599,17 +971,62 @@ function importData(event) {
   reader.onload = function(e) {
     try {
       var data = JSON.parse(e.target.result);
-      if (data.accounts) {
+      if (!data.accounts) { showToast('Invalid file format', 'error'); return; }
+
+      if (data.encrypted && data.salt && data.verify) {
+        // Encrypted export -- need passphrase to decrypt
+        var passphrase = prompt('Enter the master passphrase used when this backup was created:');
+        if (!passphrase) { showToast('Import cancelled', 'warning'); return; }
+
+        var salt = base64ToArray(data.salt);
+        deriveKey(passphrase, salt).then(function(importKey) {
+          return decryptText(data.verify, importKey).then(function(plain) {
+            if (plain !== VERIFY_SENTINEL) {
+              showToast('Wrong passphrase for this backup', 'error');
+              return;
+            }
+            // Decrypt all passwords from the import using the import key
+            var promises = data.accounts.map(function(a) {
+              var pwP = a.password ? decryptText(a.password, importKey).catch(function() { return a.password; }) : Promise.resolve('');
+              var histP = (a.passwordHistory || []).map(function(h) {
+                return h.password ? decryptText(h.password, importKey).catch(function() { return h.password; }) : Promise.resolve('');
+              });
+              return Promise.all([pwP, Promise.all(histP)]).then(function(r) {
+                a.password = r[0];
+                (a.passwordHistory || []).forEach(function(h, idx) { h.password = r[1][idx]; });
+                return a;
+              });
+            });
+            return Promise.all(promises).then(function(decrypted) {
+              accounts = decrypted;
+              // Re-encrypt with current vault key and persist
+              return persistAccounts();
+            }).then(function() {
+              if (data.policy) {
+                policy = Object.assign({}, DEFAULT_POLICY, data.policy);
+                localStorage.setItem('pm_policy', JSON.stringify(policy));
+                populatePolicyForm();
+              }
+              renderAccounts();
+              showToast('Data imported (' + accounts.length + ' accounts)', 'success');
+            });
+          });
+        }).catch(function() {
+          showToast('Wrong passphrase or corrupted file', 'error');
+        });
+      } else {
+        // Legacy unencrypted import -- encrypt with current vault key
         accounts = data.accounts;
-        persistAccounts();
+        persistAccounts().then(function() {
+          if (data.policy) {
+            policy = Object.assign({}, DEFAULT_POLICY, data.policy);
+            localStorage.setItem('pm_policy', JSON.stringify(policy));
+            populatePolicyForm();
+          }
+          renderAccounts();
+          showToast('Data imported (' + accounts.length + ' accounts)', 'success');
+        });
       }
-      if (data.policy) {
-        policy = Object.assign({}, DEFAULT_POLICY, data.policy);
-        localStorage.setItem('pm_policy', JSON.stringify(policy));
-        populatePolicyForm();
-      }
-      renderAccounts();
-      showToast('Data imported (' + accounts.length + ' accounts)', 'success');
     } catch(err) {
       showToast('Invalid file format', 'error');
     }
@@ -619,14 +1036,18 @@ function importData(event) {
 }
 
 function clearAllData() {
-  if (!confirm('Delete ALL accounts and reset policy? This cannot be undone.')) return;
+  if (!confirm('Delete ALL accounts, vault, and reset policy? This cannot be undone.')) return;
   accounts = [];
+  cryptoKey = null;
   policy = Object.assign({}, DEFAULT_POLICY);
   localStorage.removeItem('pm_accounts');
   localStorage.removeItem('pm_policy');
+  localStorage.removeItem('pm_salt');
+  localStorage.removeItem('pm_verify');
   populatePolicyForm();
   renderAccounts();
   showToast('All data cleared', 'success');
+  showLockScreen();
 }
 
 // ── Utilities ──
