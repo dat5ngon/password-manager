@@ -1,11 +1,10 @@
 // ── Defaults ──
 var DEFAULT_POLICY = { maxAge:180, minAge:2, minLength:16, complexity:true, historyCount:5, autoLockMinutes:5 };
 
-// ── Google Drive cloud sync config (SafePlace) ──
-var SAFE_PLACE_CLIENT_ID = '805871064081-6uh6ghboi12sd4p5vn26cmalfh48lgaj.apps.googleusercontent.com';
-var SAFE_PLACE_SCOPES = 'https://www.googleapis.com/auth/drive.file';
-var SAFE_PLACE_APP_NAME = 'password-manager';
-var SAFE_PLACE_FILE_NAME = 'vault-backup.json';
+// ── Google Drive sync via SafePlace iframe + postMessage ──
+var SAFE_PLACE_ORIGIN = 'https://dat5ngon.github.io';
+var SAFE_PLACE_APP = 'password-manager';
+var SAFE_PLACE_FILE = 'vault-backup.json';
 
 // ── Word lists for memorable passwords ──
 var ADVERBS = [
@@ -393,7 +392,6 @@ function onVaultUnlocked() {
     });
   });
   startAutoLockTimer();
-  initSyncAuth();
 }
 
 function lockVault(silent) {
@@ -969,7 +967,7 @@ function closeModalOnBackdrop(e) {
 
 // ── Export / Import ──
 
-// Build the encrypted backup payload (reused by file export and cloud sync)
+// Build the encrypted backup payload (reused by GDrive export)
 function buildExportPayload() {
   var rawAccounts;
   try {
@@ -988,7 +986,7 @@ function buildExportPayload() {
   };
 }
 
-// Import decrypted backup data into the vault (reused by file import and cloud sync)
+// Import backup data into the vault (reused by GDrive import)
 function applyImportData(data) {
   if (!data.accounts) return Promise.reject(new Error('Invalid file format'));
 
@@ -1037,260 +1035,120 @@ function applyImportData(data) {
   }
 }
 
-function exportData() {
-  var data = buildExportPayload();
-  var blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-  var url = URL.createObjectURL(blob);
-  var link = document.createElement('a');
-  link.href = url;
-  link.download = 'password-manager-backup-' + new Date().toISOString().slice(0,10) + '.json';
-  link.click();
-  URL.revokeObjectURL(url);
-  showToast('Data exported (passwords encrypted)', 'success');
-}
-
-function importData(event) {
-  var file = event.target.files[0];
-  if (!file) return;
-  var reader = new FileReader();
-  reader.onload = function(e) {
-    try {
-      var data = JSON.parse(e.target.result);
-      applyImportData(data).then(function() {
-        showToast('Data imported (' + accounts.length + ' accounts)', 'success');
-      }).catch(function(err) {
-        var msg = err.message || 'Import failed';
-        if (msg === 'Import cancelled') showToast(msg, 'warning');
-        else showToast(msg, 'error');
-      });
-    } catch(err) {
-      showToast('Invalid file format', 'error');
-    }
-  };
-  reader.readAsText(file);
-  event.target.value = '';
-}
-
 // ══════════════════════════════════════════════════════════════
-//  SafePlace Cloud Sync (Google Drive)
-//  Uses the SafePlace storage pattern from safe-place project.
-//  Google OAuth2 for auth, Google Drive API for file storage.
-//  Folder structure: SafePlace/password-manager/vault-backup.json
+//  Google Drive Sync (via SafePlace iframe + postMessage)
 // ══════════════════════════════════════════════════════════════
 
-// SafePlaceStorage -- Google Drive wrapper (ES5, adapted from safe-place project)
-function SafePlaceStorage(accessToken, rootFolderId) {
-  this.accessToken = accessToken;
-  this.rootFolderId = rootFolderId;
-}
+var safePlaceFrame = document.getElementById('safePlaceFrame');
 
-SafePlaceStorage.prototype._api = function(path, options) {
-  options = options || {};
-  var url = path.indexOf('http') === 0 ? path : 'https://www.googleapis.com/drive/v3' + path;
-  var headers = Object.assign({}, { 'Authorization': 'Bearer ' + this.accessToken }, options.headers || {});
-  var fetchOpts = Object.assign({}, options, { headers: headers });
-  return fetch(url, fetchOpts).then(function(res) {
-    if (!res.ok) {
-      return res.json().catch(function() { return {}; }).then(function(err) {
-        var msg = (err.error && err.error.message) ? err.error.message : 'Drive API error: ' + res.status;
-        return Promise.reject(new Error(msg));
-      });
+// Send a request to safe-place iframe and wait for response (ES5)
+function safePlaceRequest(action, params) {
+  params = params || {};
+  return new Promise(function(resolve, reject) {
+    var id = 'sp_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
+    var timeout = setTimeout(function() {
+      window.removeEventListener('message', handler);
+      reject(new Error('Safe Place not responding. Make sure you are signed in at Safe Place.'));
+    }, 10000);
+
+    function handler(event) {
+      if (event.origin !== SAFE_PLACE_ORIGIN) return;
+      var msg = event.data;
+      if (!msg || msg.type !== 'safeplace-response' || msg.id !== id) return;
+      clearTimeout(timeout);
+      window.removeEventListener('message', handler);
+      if (msg.ok) resolve(msg);
+      else reject(new Error(msg.error || 'Unknown error'));
     }
-    return res;
-  });
-};
 
-SafePlaceStorage.prototype.getOrCreateFolder = function(name, parentId) {
-  parentId = parentId || this.rootFolderId;
-  var self = this;
-  var query = "name='" + name + "' and '" + parentId + "' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false";
-  return this._api('/files?q=' + encodeURIComponent(query) + '&fields=files(id,name)').then(function(res) {
-    return res.json();
-  }).then(function(data) {
-    if (data.files && data.files.length > 0) return data.files[0];
-    return self._api('/files', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: name, mimeType: 'application/vnd.google-apps.folder', parents: [parentId] })
-    }).then(function(createRes) { return createRes.json(); });
-  });
-};
-
-SafePlaceStorage.prototype.getAppFolder = function(appName) {
-  return this.getOrCreateFolder(appName, this.rootFolderId);
-};
-
-SafePlaceStorage.prototype.findFile = function(name, folderId) {
-  folderId = folderId || this.rootFolderId;
-  var query = "name='" + name + "' and '" + folderId + "' in parents and trashed=false";
-  return this._api('/files?q=' + encodeURIComponent(query) + '&fields=files(id,name,size,modifiedTime,mimeType)').then(function(res) {
-    return res.json();
-  }).then(function(data) {
-    return (data.files && data.files.length > 0) ? data.files[0] : null;
-  });
-};
-
-SafePlaceStorage.prototype.uploadData = function(name, data, mimeType, folderId) {
-  folderId = folderId || this.rootFolderId;
-  var form = new FormData();
-  form.append('metadata', new Blob([JSON.stringify({ name: name, parents: [folderId] })], { type: 'application/json' }));
-  form.append('file', new Blob([data], { type: mimeType }));
-  return fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name', {
-    method: 'POST',
-    headers: { 'Authorization': 'Bearer ' + this.accessToken },
-    body: form
-  }).then(function(res) {
-    if (!res.ok) {
-      return res.json().catch(function() { return {}; }).then(function(err) {
-        var msg = (err.error && err.error.message) ? err.error.message : 'Upload failed: ' + res.status;
-        return Promise.reject(new Error(msg));
-      });
-    }
-    return res.json();
-  });
-};
-
-SafePlaceStorage.prototype.downloadJSON = function(fileId) {
-  return this._api('/files/' + fileId + '?alt=media').then(function(res) {
-    return res.json();
-  });
-};
-
-SafePlaceStorage.prototype.deleteFile = function(fileId) {
-  return fetch('https://www.googleapis.com/drive/v3/files/' + fileId, {
-    method: 'DELETE',
-    headers: { 'Authorization': 'Bearer ' + this.accessToken }
-  });
-};
-
-// ── Sync state ──
-var syncTokenClient = null;
-var syncStorage = null;
-var syncAppFolderId = null;
-
-function initSyncAuth() {
-  if (typeof google === 'undefined' || !google.accounts || !google.accounts.oauth2) {
-    setTimeout(initSyncAuth, 300);
-    return;
-  }
-  syncTokenClient = google.accounts.oauth2.initTokenClient({
-    client_id: SAFE_PLACE_CLIENT_ID,
-    scope: SAFE_PLACE_SCOPES,
-    callback: handleSyncAuthResponse
-  });
-  var btn = document.getElementById('syncSignInBtn');
-  if (btn) btn.disabled = false;
-}
-
-function handleSyncAuthResponse(response) {
-  if (response.error) {
-    setSyncStatus('Sign-in failed: ' + response.error, true);
-    return;
-  }
-  syncStorage = new SafePlaceStorage(response.access_token, null);
-  syncStorage.getOrCreateFolder('SafePlace', 'root').then(function(rootFolder) {
-    syncStorage.rootFolderId = rootFolder.id;
-    return syncStorage.getAppFolder(SAFE_PLACE_APP_NAME);
-  }).then(function(appFolder) {
-    syncAppFolderId = appFolder.id;
-    // Show sync buttons, hide sign-in
-    document.getElementById('syncSignInBtn').classList.add('hidden');
-    document.getElementById('cloudExportBtn').classList.remove('hidden');
-    document.getElementById('cloudImportBtn').classList.remove('hidden');
-    document.getElementById('syncSignOutBtn').classList.remove('hidden');
-    setSyncStatus('Connected');
-  }).catch(function(err) {
-    setSyncStatus('Error: ' + (err.message || err), true);
+    window.addEventListener('message', handler);
+    var payload = Object.assign({ type: 'safeplace-request', id: id, action: action }, params);
+    safePlaceFrame.contentWindow.postMessage(payload, SAFE_PLACE_ORIGIN);
   });
 }
 
-function handleSyncSignIn() {
-  if (!syncTokenClient) {
-    setSyncStatus('Google API loading...', true);
-    return;
-  }
-  syncTokenClient.requestAccessToken({ prompt: 'consent' });
-}
-
-function handleSyncSignOut() {
-  if (syncStorage && syncStorage.accessToken) {
-    google.accounts.oauth2.revoke(syncStorage.accessToken);
-  }
-  syncStorage = null;
-  syncAppFolderId = null;
-  document.getElementById('syncSignInBtn').classList.remove('hidden');
-  document.getElementById('cloudExportBtn').classList.add('hidden');
-  document.getElementById('cloudImportBtn').classList.add('hidden');
-  document.getElementById('syncSignOutBtn').classList.add('hidden');
+function handleSyncError(err) {
   setSyncStatus('');
+  var msg = err.message || '';
+  var isAuthError = msg.indexOf('Not authenticated') !== -1 ||
+                    msg.indexOf('not responding') !== -1 ||
+                    msg.indexOf('sign in') !== -1;
+  if (isAuthError) {
+    showSyncAuthDialog();
+  } else {
+    showToast(msg || 'Sync failed', 'error');
+  }
 }
 
-// Push encrypted backup to Google Drive
-function cloudExport() {
-  if (!syncStorage || !syncAppFolderId) {
-    setSyncStatus('Not connected', true);
-    return;
-  }
+function showSyncAuthDialog() {
+  var html = '<h2>Sign in Required</h2>' +
+    '<p style="color:var(--text-dim);font-size:13px;margin-bottom:16px;">' +
+    'You need to sign in to Safe Place first to use Google Drive backup. ' +
+    'Open Safe Place in a new tab, sign in, then come back and try again.</p>' +
+    '<div class="btn-group">' +
+      '<button class="btn btn-primary" onclick="window.open(\'https://dat5ngon.github.io/safe-place/\', \'_blank\'); closeModal();">open safe place</button>' +
+      '<button class="btn btn-outline" onclick="closeModal()">cancel</button>' +
+    '</div>';
+  document.getElementById('modal-content').innerHTML = html;
+  document.getElementById('modal-overlay').classList.add('active');
+}
+
+// Export encrypted vault to Google Drive
+function exportToGDrive() {
   if (!cryptoKey) {
     showToast('Vault must be unlocked to export', 'error');
     return;
   }
+  if (accounts.length === 0) {
+    showToast('No accounts to export', 'warning');
+    return;
+  }
 
-  var btn = document.getElementById('cloudExportBtn');
-  btn.disabled = true;
-  setSyncStatus('Exporting...');
-
+  setSyncStatus('Exporting to Google Drive...');
   var data = buildExportPayload();
-  var content = JSON.stringify(data, null, 2);
 
-  // Delete existing file first to avoid duplicates
-  syncStorage.findFile(SAFE_PLACE_FILE_NAME, syncAppFolderId).then(function(existing) {
-    if (existing) return syncStorage.deleteFile(existing.id);
-    return Promise.resolve();
-  }).then(function() {
-    return syncStorage.uploadData(SAFE_PLACE_FILE_NAME, content, 'application/json', syncAppFolderId);
+  safePlaceRequest('save', {
+    app: SAFE_PLACE_APP,
+    filename: SAFE_PLACE_FILE,
+    data: data
   }).then(function() {
     setSyncStatus('Exported ' + accounts.length + ' accounts');
     showToast('Vault exported to Google Drive', 'success');
   }).catch(function(err) {
-    setSyncStatus('Export failed: ' + (err.message || err), true);
-  }).then(function() {
-    btn.disabled = false;
+    handleSyncError(err);
   });
 }
 
-// Pull encrypted backup from Google Drive
-function cloudImport() {
-  if (!syncStorage || !syncAppFolderId) {
-    setSyncStatus('Not connected', true);
-    return;
-  }
+// Import encrypted vault from Google Drive
+function importFromGDrive() {
   if (!cryptoKey) {
     showToast('Vault must be unlocked to import', 'error');
     return;
   }
 
-  var btn = document.getElementById('cloudImportBtn');
-  btn.disabled = true;
-  setSyncStatus('Importing...');
+  setSyncStatus('Importing from Google Drive...');
 
-  syncStorage.findFile(SAFE_PLACE_FILE_NAME, syncAppFolderId).then(function(file) {
-    if (!file) {
-      setSyncStatus('No backup found', true);
-      return Promise.reject(new Error('No backup found on Google Drive'));
+  safePlaceRequest('load', {
+    app: SAFE_PLACE_APP,
+    filename: SAFE_PLACE_FILE
+  }).then(function(result) {
+    if (!result.data) {
+      setSyncStatus('');
+      showToast('No backup found on Google Drive', 'warning');
+      return;
     }
-    return syncStorage.downloadJSON(file.id);
-  }).then(function(data) {
-    return applyImportData(data).then(function() {
+    return applyImportData(result.data).then(function() {
       setSyncStatus('Imported ' + accounts.length + ' accounts');
       showToast('Vault imported from Google Drive (' + accounts.length + ' accounts)', 'success');
     });
   }).catch(function(err) {
-    var msg = err.message || 'Import failed';
-    if (msg === 'Import cancelled') showToast(msg, 'warning');
-    else if (msg !== 'No backup found on Google Drive') setSyncStatus('Import failed: ' + msg, true);
-  }).then(function() {
-    btn.disabled = false;
+    var msg = err.message || '';
+    if (msg === 'Import cancelled') {
+      setSyncStatus('');
+      showToast(msg, 'warning');
+    } else {
+      handleSyncError(err);
+    }
   });
 }
 
