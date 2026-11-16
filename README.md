@@ -17,6 +17,7 @@ A client-side password manager with encrypted vault, configurable policies, pass
 - **Minimum Password Age** -- prevents changing passwords too frequently
 - **Strength Meter** -- visual indicator of password strength
 - **Export/Import** -- backup and restore data as encrypted JSON (requires passphrase to import)
+- **Cloud Sync** -- push/pull encrypted vault to GitHub Pages (`01-projects/safe-place`) for cross-device sync
 - **Mobile-friendly** -- responsive design, works on phones and tablets
 
 ## Default Policy
@@ -66,16 +67,52 @@ To access from your phone without buying a domain:
 
 GitHub Pages serves over HTTPS, so the Web Crypto API works out of the box.
 
-**Important:** The app itself is publicly accessible, but your passwords are encrypted with your master passphrase and stored only in YOUR browser's localStorage. They never leave your device. Each device has its own separate data. Use Export/Import to sync between devices.
+**Important:** The app itself is publicly accessible, but your passwords are encrypted with your master passphrase and stored only in YOUR browser's localStorage. They never leave your device. Each device has its own separate data. Use Export/Import or Cloud Sync to sync between devices.
+
+## Cloud Sync (GitHub Pages)
+
+Sync your encrypted vault across devices using a GitHub repository as cloud storage.
+
+### Setup
+
+1. Create a GitHub repo named `safe-place` under your account/org (e.g. `01-projects/safe-place`)
+2. Enable GitHub Pages on the repo (Settings > Pages > Deploy from branch `main`, folder `/`)
+3. Generate a [Personal Access Token](https://github.com/settings/tokens/new?scopes=repo&description=password-manager-sync) with `repo` scope
+4. In the app, go to **Policy > Cloud Sync > Settings** and paste your token
+
+### Usage
+
+- **Push to cloud** -- uploads your encrypted vault to `vault-backup.json` in the repo
+- **Pull from cloud** -- downloads and imports the backup (prompts for the backup's master passphrase if different from current)
+- The backup file is served via GitHub Pages at `https://01-projects.github.io/safe-place/vault-backup.json`
+
+### How it works
+
+1. **Push**: the app builds an encrypted backup payload (same format as file export) and uploads it to the repo via the GitHub Contents API
+2. **Pull**: the app fetches the backup from GitHub Pages (public) or the API (private repos), then decrypts and imports it
+3. All passwords in the backup are AES-256-GCM encrypted -- the GitHub repo only ever contains ciphertext
+4. The GitHub token is stored in `localStorage` (`pm_github_token`) and never leaves your browser except in API calls to `api.github.com`
+
+### Configuration
+
+The repo owner and name are set in [`app.js`](app.js:5):
+
+```javascript
+var GITHUB_REPO_OWNER = '01-projects';
+var GITHUB_REPO_NAME = 'safe-place';
+```
+
+Change these if your repo is at a different location.
 
 ## Security
 
 - **Encryption**: AES-256-GCM with a key derived from your master passphrase via PBKDF2 (100k iterations, SHA-256)
-- **No plaintext passwords** in localStorage or export files -- everything is encrypted at rest
+- **No plaintext passwords** in localStorage, export files, or cloud backups -- everything is encrypted at rest
 - **Auto-lock** wipes the decryption key from memory after configurable inactivity
 - **Password generation** uses `crypto.getRandomValues()` (cryptographically secure PRNG)
-- **Zero dependencies** -- no external libraries, no network requests after page load
+- **Zero dependencies** -- no external libraries, minimal network requests (only for cloud sync)
 - **Export files** contain encrypted passwords -- require the master passphrase to import
+- **Cloud sync** uploads only encrypted data -- your GitHub repo never contains plaintext passwords
 - **Each browser/device** has independent data storage
 
 ## Architecture

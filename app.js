@@ -1,6 +1,12 @@
 // ── Defaults ──
 var DEFAULT_POLICY = { maxAge:180, minAge:2, minLength:16, complexity:true, historyCount:5, autoLockMinutes:5 };
 
+// ── GitHub Pages cloud sync config ──
+var GITHUB_REPO_OWNER = '01-projects';
+var GITHUB_REPO_NAME = 'safe-place';
+var GITHUB_BACKUP_FILE = 'vault-backup.json';
+var GITHUB_BRANCH = 'main';
+
 // ── Word lists for memorable passwords ──
 var ADVERBS = [
   'always','almost','barely','boldly','bravely','briskly','calmly','clearly',
@@ -961,8 +967,9 @@ function closeModalOnBackdrop(e) {
 }
 
 // ── Export / Import ──
-function exportData() {
-  // Export uses the already-encrypted data from localStorage directly
+
+// Build the encrypted backup payload (reused by file export and cloud sync)
+function buildExportPayload() {
   var rawAccounts;
   try {
     var s = localStorage.getItem('pm_accounts');
@@ -970,7 +977,7 @@ function exportData() {
   } catch(e) {
     rawAccounts = [];
   }
-  var data = {
+  return {
     policy: policy,
     accounts: rawAccounts,
     encrypted: true,
@@ -978,6 +985,59 @@ function exportData() {
     verify: localStorage.getItem('pm_verify'),
     exportDate: new Date().toISOString()
   };
+}
+
+// Import decrypted backup data into the vault (reused by file import and cloud sync)
+function applyImportData(data) {
+  if (!data.accounts) return Promise.reject(new Error('Invalid file format'));
+
+  if (data.encrypted && data.salt && data.verify) {
+    var passphrase = prompt('Enter the master passphrase used when this backup was created:');
+    if (!passphrase) return Promise.reject(new Error('Import cancelled'));
+
+    var salt = base64ToArray(data.salt);
+    return deriveKey(passphrase, salt).then(function(importKey) {
+      return decryptText(data.verify, importKey).then(function(plain) {
+        if (plain !== VERIFY_SENTINEL) return Promise.reject(new Error('Wrong passphrase'));
+        var promises = data.accounts.map(function(a) {
+          var pwP = a.password ? decryptText(a.password, importKey).catch(function() { return a.password; }) : Promise.resolve('');
+          var histP = (a.passwordHistory || []).map(function(h) {
+            return h.password ? decryptText(h.password, importKey).catch(function() { return h.password; }) : Promise.resolve('');
+          });
+          return Promise.all([pwP, Promise.all(histP)]).then(function(r) {
+            a.password = r[0];
+            (a.passwordHistory || []).forEach(function(h, idx) { h.password = r[1][idx]; });
+            return a;
+          });
+        });
+        return Promise.all(promises).then(function(decrypted) {
+          accounts = decrypted;
+          return persistAccounts();
+        }).then(function() {
+          if (data.policy) {
+            policy = Object.assign({}, DEFAULT_POLICY, data.policy);
+            localStorage.setItem('pm_policy', JSON.stringify(policy));
+            populatePolicyForm();
+          }
+          renderAccounts();
+        });
+      });
+    });
+  } else {
+    accounts = data.accounts;
+    return persistAccounts().then(function() {
+      if (data.policy) {
+        policy = Object.assign({}, DEFAULT_POLICY, data.policy);
+        localStorage.setItem('pm_policy', JSON.stringify(policy));
+        populatePolicyForm();
+      }
+      renderAccounts();
+    });
+  }
+}
+
+function exportData() {
+  var data = buildExportPayload();
   var blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
   var url = URL.createObjectURL(blob);
   var link = document.createElement('a');
@@ -995,68 +1055,191 @@ function importData(event) {
   reader.onload = function(e) {
     try {
       var data = JSON.parse(e.target.result);
-      if (!data.accounts) { showToast('Invalid file format', 'error'); return; }
-
-      if (data.encrypted && data.salt && data.verify) {
-        // Encrypted export -- need passphrase to decrypt
-        var passphrase = prompt('Enter the master passphrase used when this backup was created:');
-        if (!passphrase) { showToast('Import cancelled', 'warning'); return; }
-
-        var salt = base64ToArray(data.salt);
-        deriveKey(passphrase, salt).then(function(importKey) {
-          return decryptText(data.verify, importKey).then(function(plain) {
-            if (plain !== VERIFY_SENTINEL) {
-              showToast('Wrong passphrase for this backup', 'error');
-              return;
-            }
-            // Decrypt all passwords from the import using the import key
-            var promises = data.accounts.map(function(a) {
-              var pwP = a.password ? decryptText(a.password, importKey).catch(function() { return a.password; }) : Promise.resolve('');
-              var histP = (a.passwordHistory || []).map(function(h) {
-                return h.password ? decryptText(h.password, importKey).catch(function() { return h.password; }) : Promise.resolve('');
-              });
-              return Promise.all([pwP, Promise.all(histP)]).then(function(r) {
-                a.password = r[0];
-                (a.passwordHistory || []).forEach(function(h, idx) { h.password = r[1][idx]; });
-                return a;
-              });
-            });
-            return Promise.all(promises).then(function(decrypted) {
-              accounts = decrypted;
-              // Re-encrypt with current vault key and persist
-              return persistAccounts();
-            }).then(function() {
-              if (data.policy) {
-                policy = Object.assign({}, DEFAULT_POLICY, data.policy);
-                localStorage.setItem('pm_policy', JSON.stringify(policy));
-                populatePolicyForm();
-              }
-              renderAccounts();
-              showToast('Data imported (' + accounts.length + ' accounts)', 'success');
-            });
-          });
-        }).catch(function() {
-          showToast('Wrong passphrase or corrupted file', 'error');
-        });
-      } else {
-        // Legacy unencrypted import -- encrypt with current vault key
-        accounts = data.accounts;
-        persistAccounts().then(function() {
-          if (data.policy) {
-            policy = Object.assign({}, DEFAULT_POLICY, data.policy);
-            localStorage.setItem('pm_policy', JSON.stringify(policy));
-            populatePolicyForm();
-          }
-          renderAccounts();
-          showToast('Data imported (' + accounts.length + ' accounts)', 'success');
-        });
-      }
+      applyImportData(data).then(function() {
+        showToast('Data imported (' + accounts.length + ' accounts)', 'success');
+      }).catch(function(err) {
+        var msg = err.message || 'Import failed';
+        if (msg === 'Import cancelled') showToast(msg, 'warning');
+        else showToast(msg, 'error');
+      });
     } catch(err) {
       showToast('Invalid file format', 'error');
     }
   };
   reader.readAsText(file);
   event.target.value = '';
+}
+
+// ══════════════════════════════════════════════════════════════
+//  GitHub Pages Cloud Sync
+//  Pushes/pulls encrypted vault backup to a GitHub repo via API.
+//  The repo (e.g. 01-projects/safe-place) can serve the file
+//  via GitHub Pages for read access without a token.
+// ══════════════════════════════════════════════════════════════
+
+function getGitHubToken() {
+  return localStorage.getItem('pm_github_token') || '';
+}
+
+function saveGitHubToken(token) {
+  if (token) {
+    localStorage.setItem('pm_github_token', token);
+  } else {
+    localStorage.removeItem('pm_github_token');
+  }
+}
+
+function getGitHubApiUrl() {
+  return 'https://api.github.com/repos/' + GITHUB_REPO_OWNER + '/' + GITHUB_REPO_NAME + '/contents/' + GITHUB_BACKUP_FILE;
+}
+
+function getGitHubPagesUrl() {
+  return 'https://' + GITHUB_REPO_OWNER + '.github.io/' + GITHUB_REPO_NAME + '/' + GITHUB_BACKUP_FILE;
+}
+
+// Push encrypted backup to GitHub repo
+function cloudExport() {
+  var token = getGitHubToken();
+  if (!token) {
+    showToast('Set your GitHub token first (Policy > Cloud Sync)', 'error');
+    return;
+  }
+  if (!cryptoKey) {
+    showToast('Vault must be unlocked to export', 'error');
+    return;
+  }
+
+  var data = buildExportPayload();
+  var content = JSON.stringify(data, null, 2);
+  // GitHub API requires base64-encoded content
+  var b64Content = btoa(unescape(encodeURIComponent(content)));
+
+  showToast('Uploading to GitHub...', 'warning');
+
+  // First, check if file already exists (need its SHA to update)
+  fetch(getGitHubApiUrl(), {
+    headers: {
+      'Authorization': 'Bearer ' + token,
+      'Accept': 'application/vnd.github.v3+json'
+    }
+  }).then(function(resp) {
+    if (resp.ok) return resp.json();
+    if (resp.status === 404) return null;
+    return resp.json().then(function(err) {
+      return Promise.reject(new Error(err.message || 'GitHub API error ' + resp.status));
+    });
+  }).then(function(existing) {
+    var body = {
+      message: 'vault backup ' + new Date().toISOString(),
+      content: b64Content,
+      branch: GITHUB_BRANCH
+    };
+    if (existing && existing.sha) {
+      body.sha = existing.sha; // required for updates
+    }
+    return fetch(getGitHubApiUrl(), {
+      method: 'PUT',
+      headers: {
+        'Authorization': 'Bearer ' + token,
+        'Accept': 'application/vnd.github.v3+json',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(body)
+    });
+  }).then(function(resp) {
+    if (!resp.ok) {
+      return resp.json().then(function(err) {
+        return Promise.reject(new Error(err.message || 'Upload failed'));
+      });
+    }
+    showToast('Backup pushed to GitHub', 'success');
+  }).catch(function(err) {
+    showToast('Cloud export failed: ' + (err.message || err), 'error');
+  });
+}
+
+// Pull encrypted backup from GitHub (tries Pages URL first, falls back to API)
+function cloudImport() {
+  if (!cryptoKey) {
+    showToast('Vault must be unlocked to import', 'error');
+    return;
+  }
+
+  showToast('Fetching from GitHub...', 'warning');
+
+  // Try GitHub Pages URL first (works for public repos, no token needed)
+  var pagesUrl = getGitHubPagesUrl() + '?t=' + Date.now(); // cache-bust
+  fetch(pagesUrl).then(function(resp) {
+    if (resp.ok) return resp.text();
+    // Fall back to API (works for private repos with token)
+    var token = getGitHubToken();
+    if (!token) return Promise.reject(new Error('File not found on GitHub Pages and no token set'));
+    return fetch(getGitHubApiUrl(), {
+      headers: {
+        'Authorization': 'Bearer ' + token,
+        'Accept': 'application/vnd.github.v3+json'
+      }
+    }).then(function(apiResp) {
+      if (!apiResp.ok) return Promise.reject(new Error('GitHub API error ' + apiResp.status));
+      return apiResp.json().then(function(fileData) {
+        // API returns base64-encoded content
+        return decodeURIComponent(escape(atob(fileData.content.replace(/\n/g, ''))));
+      });
+    });
+  }).then(function(text) {
+    var data = JSON.parse(text);
+    return applyImportData(data).then(function() {
+      showToast('Cloud import complete (' + accounts.length + ' accounts)', 'success');
+    });
+  }).catch(function(err) {
+    var msg = err.message || 'Cloud import failed';
+    if (msg === 'Import cancelled') showToast(msg, 'warning');
+    else showToast('Cloud import failed: ' + msg, 'error');
+  });
+}
+
+// Show GitHub token configuration dialog
+function showCloudSyncDialog() {
+  var currentToken = getGitHubToken();
+  var masked = currentToken ? currentToken.substring(0, 8) + '...' + currentToken.slice(-4) : 'Not set';
+  var pagesUrl = getGitHubPagesUrl();
+
+  var html = '<h2>&#9729; Cloud Sync Settings</h2>' +
+    '<p style="color:var(--text-dim);font-size:12px;margin-bottom:16px;">' +
+      'Sync your encrypted vault to <strong>' + escHtml(GITHUB_REPO_OWNER + '/' + GITHUB_REPO_NAME) + '</strong> via GitHub.' +
+    '</p>' +
+    '<div class="form-group"><label>GitHub Personal Access Token</label>' +
+      '<input type="password" id="github-token-input" placeholder="ghp_xxxxxxxxxxxx" value="' + escAttr(currentToken) + '" autocomplete="off">' +
+      '<p style="color:var(--text-muted);font-size:11px;margin-top:4px;">Needs <code>repo</code> scope. ' +
+        '<a href="https://github.com/settings/tokens/new?scopes=repo&description=password-manager-sync" target="_blank" ' +
+        'style="color:var(--accent);">Create token</a></p>' +
+    '</div>' +
+    '<div class="form-group"><label>Status</label>' +
+      '<div style="padding:4px 0;font-size:13px;color:var(--text-muted);">Token: ' + escHtml(masked) + '</div>' +
+      '<div style="padding:4px 0;font-size:11px;color:var(--text-muted);">Pages URL: <a href="' + escAttr(pagesUrl) + '" target="_blank" style="color:var(--accent);word-break:break-all;">' + escHtml(pagesUrl) + '</a></div>' +
+    '</div>' +
+    '<div class="btn-group" style="margin-top:16px;">' +
+      '<button class="btn btn-primary" onclick="saveCloudToken()">save token</button>' +
+      '<button class="btn btn-outline" onclick="clearCloudToken()">clear token</button>' +
+      '<button class="btn btn-outline" onclick="closeModal()">close</button>' +
+    '</div>';
+
+  document.getElementById('modal-content').innerHTML = html;
+  document.getElementById('modal-overlay').classList.add('active');
+}
+
+function saveCloudToken() {
+  var token = document.getElementById('github-token-input').value.trim();
+  if (!token) { showToast('Token is required', 'error'); return; }
+  saveGitHubToken(token);
+  closeModal();
+  showToast('GitHub token saved', 'success');
+}
+
+function clearCloudToken() {
+  saveGitHubToken('');
+  closeModal();
+  showToast('GitHub token cleared', 'success');
 }
 
 function clearAllData() {
