@@ -158,13 +158,15 @@
     <div class="card">
       <h2><span class="indicator"></span> &#9729; Cloud Sync</h2>
       <p style="color:var(--text-dim);font-size:12px;margin-bottom:12px;">
-        Sync encrypted vault to GitHub Pages (<strong>01-projects/safe-place</strong>). Passwords stay encrypted -- only you can decrypt them.
+        Sync encrypted vault to Google Drive via SafePlace. Passwords stay encrypted -- only you can decrypt them.
       </p>
       <div class="data-actions">
-        <button class="btn btn-primary btn-sm" onclick="cloudExport()">&#9650; push to cloud</button>
-        <button class="btn btn-outline btn-sm" onclick="cloudImport()">&#9660; pull from cloud</button>
-        <button class="btn btn-outline btn-sm" onclick="showCloudSyncDialog()">&#9881; settings</button>
+        <button id="syncSignInBtn" class="btn btn-primary btn-sm" onclick="handleSyncSignIn()" disabled>&#9729; Sign In</button>
+        <button id="cloudExportBtn" class="btn btn-primary btn-sm hidden" onclick="cloudExport()">&#9650; push to cloud</button>
+        <button id="cloudImportBtn" class="btn btn-outline btn-sm hidden" onclick="cloudImport()">&#9660; pull from cloud</button>
+        <button id="syncSignOutBtn" class="btn btn-outline btn-sm hidden" onclick="handleSyncSignOut()">&#10005; sign out</button>
       </div>
+      <div id="syncStatus" style="font-size:12px;margin-top:8px;min-height:16px;color:var(--text-muted);"></div>
     </div>
   </div>
 </div>
@@ -177,6 +179,7 @@
 <!-- Toasts -->
 <div class="toast-container" id="toast-container"></div>
 
+<script src="https://accounts.google.com/gsi/client" async defer></script>
 <script src="app.js"></script>
 </body>
 </html>

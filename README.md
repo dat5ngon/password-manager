@@ -17,7 +17,7 @@ A client-side password manager with encrypted vault, configurable policies, pass
 - **Minimum Password Age** -- prevents changing passwords too frequently
 - **Strength Meter** -- visual indicator of password strength
 - **Export/Import** -- backup and restore data as encrypted JSON (requires passphrase to import)
-- **Cloud Sync** -- push/pull encrypted vault to GitHub Pages (`01-projects/safe-place`) for cross-device sync
+- **Cloud Sync** -- push/pull encrypted vault to Google Drive via SafePlace for cross-device sync
 - **Mobile-friendly** -- responsive design, works on phones and tablets
 
 ## Default Policy
@@ -69,40 +69,36 @@ GitHub Pages serves over HTTPS, so the Web Crypto API works out of the box.
 
 **Important:** The app itself is publicly accessible, but your passwords are encrypted with your master passphrase and stored only in YOUR browser's localStorage. They never leave your device. Each device has its own separate data. Use Export/Import or Cloud Sync to sync between devices.
 
-## Cloud Sync (GitHub Pages)
+## Cloud Sync (Google Drive via SafePlace)
 
-Sync your encrypted vault across devices using a GitHub repository as cloud storage.
-
-### Setup
-
-1. Create a GitHub repo named `safe-place` under your account/org (e.g. `01-projects/safe-place`)
-2. Enable GitHub Pages on the repo (Settings > Pages > Deploy from branch `main`, folder `/`)
-3. Generate a [Personal Access Token](https://github.com/settings/tokens/new?scopes=repo&description=password-manager-sync) with `repo` scope
-4. In the app, go to **Policy > Cloud Sync > Settings** and paste your token
-
-### Usage
-
-- **Push to cloud** -- uploads your encrypted vault to `vault-backup.json` in the repo
-- **Pull from cloud** -- downloads and imports the backup (prompts for the backup's master passphrase if different from current)
-- The backup file is served via GitHub Pages at `https://01-projects.github.io/safe-place/vault-backup.json`
+Sync your encrypted vault across devices using Google Drive as cloud storage, powered by the [SafePlace](https://github.com/dat5ngon/safe-place) storage API.
 
 ### How it works
 
-1. **Push**: the app builds an encrypted backup payload (same format as file export) and uploads it to the repo via the GitHub Contents API
-2. **Pull**: the app fetches the backup from GitHub Pages (public) or the API (private repos), then decrypts and imports it
-3. All passwords in the backup are AES-256-GCM encrypted -- the GitHub repo only ever contains ciphertext
-4. The GitHub token is stored in `localStorage` (`pm_github_token`) and never leaves your browser except in API calls to `api.github.com`
+1. In the app, go to **Policy > Cloud Sync** and click **Sign In** to authenticate with Google
+2. Google OAuth grants `drive.file` scope -- the app can only access files it creates, not your entire Drive
+3. The app creates a folder structure: `SafePlace/password-manager/vault-backup.json`
+4. **Push to cloud** uploads the encrypted vault backup to Google Drive
+5. **Pull from cloud** downloads and imports the backup (prompts for the backup's master passphrase if different)
+6. All passwords in the backup are AES-256-GCM encrypted -- Google Drive only ever stores ciphertext
+
+### Usage
+
+- **Sign In** -- authenticates with Google (one-time per session, re-authenticate after page reload)
+- **Push to cloud** -- uploads encrypted vault to `SafePlace/password-manager/vault-backup.json` on Google Drive
+- **Pull from cloud** -- downloads and imports the backup
+- **Sign out** -- revokes the Google access token
 
 ### Configuration
 
-The repo owner and name are set in [`app.js`](app.js:5):
+The app name and file name are set in [`app.js`](app.js:5):
 
 ```javascript
-var GITHUB_REPO_OWNER = '01-projects';
-var GITHUB_REPO_NAME = 'safe-place';
+var SAFE_PLACE_APP_NAME = 'password-manager';
+var SAFE_PLACE_FILE_NAME = 'vault-backup.json';
 ```
 
-Change these if your repo is at a different location.
+The Google OAuth client ID is shared with the SafePlace project.
 
 ## Security
 
@@ -110,9 +106,10 @@ Change these if your repo is at a different location.
 - **No plaintext passwords** in localStorage, export files, or cloud backups -- everything is encrypted at rest
 - **Auto-lock** wipes the decryption key from memory after configurable inactivity
 - **Password generation** uses `crypto.getRandomValues()` (cryptographically secure PRNG)
-- **Zero dependencies** -- no external libraries, minimal network requests (only for cloud sync)
+- **Zero dependencies** -- no external libraries beyond Google Identity Services (loaded for cloud sync only)
 - **Export files** contain encrypted passwords -- require the master passphrase to import
-- **Cloud sync** uploads only encrypted data -- your GitHub repo never contains plaintext passwords
+- **Cloud sync** uploads only encrypted data -- Google Drive never contains plaintext passwords
+- **Google OAuth scope** is `drive.file` -- the app can only access files it created, not your entire Drive
 - **Each browser/device** has independent data storage
 
 ## Architecture

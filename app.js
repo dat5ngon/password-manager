@@ -1,11 +1,11 @@
 // ── Defaults ──
 var DEFAULT_POLICY = { maxAge:180, minAge:2, minLength:16, complexity:true, historyCount:5, autoLockMinutes:5 };
 
-// ── GitHub Pages cloud sync config ──
-var GITHUB_REPO_OWNER = '01-projects';
-var GITHUB_REPO_NAME = 'safe-place';
-var GITHUB_BACKUP_FILE = 'vault-backup.json';
-var GITHUB_BRANCH = 'main';
+// ── Google Drive cloud sync config (SafePlace) ──
+var SAFE_PLACE_CLIENT_ID = '805871064081-6uh6ghboi12sd4p5vn26cmalfh48lgaj.apps.googleusercontent.com';
+var SAFE_PLACE_SCOPES = 'https://www.googleapis.com/auth/drive.file';
+var SAFE_PLACE_APP_NAME = 'password-manager';
+var SAFE_PLACE_FILE_NAME = 'vault-backup.json';
 
 // ── Word lists for memorable passwords ──
 var ADVERBS = [
@@ -393,6 +393,7 @@ function onVaultUnlocked() {
     });
   });
   startAutoLockTimer();
+  initSyncAuth();
 }
 
 function lockVault(silent) {
@@ -1071,37 +1072,163 @@ function importData(event) {
 }
 
 // ══════════════════════════════════════════════════════════════
-//  GitHub Pages Cloud Sync
-//  Pushes/pulls encrypted vault backup to a GitHub repo via API.
-//  The repo (e.g. 01-projects/safe-place) can serve the file
-//  via GitHub Pages for read access without a token.
+//  SafePlace Cloud Sync (Google Drive)
+//  Uses the SafePlace storage pattern from safe-place project.
+//  Google OAuth2 for auth, Google Drive API for file storage.
+//  Folder structure: SafePlace/password-manager/vault-backup.json
 // ══════════════════════════════════════════════════════════════
 
-function getGitHubToken() {
-  return localStorage.getItem('pm_github_token') || '';
+// SafePlaceStorage -- Google Drive wrapper (ES5, adapted from safe-place project)
+function SafePlaceStorage(accessToken, rootFolderId) {
+  this.accessToken = accessToken;
+  this.rootFolderId = rootFolderId;
 }
 
-function saveGitHubToken(token) {
-  if (token) {
-    localStorage.setItem('pm_github_token', token);
-  } else {
-    localStorage.removeItem('pm_github_token');
+SafePlaceStorage.prototype._api = function(path, options) {
+  options = options || {};
+  var url = path.indexOf('http') === 0 ? path : 'https://www.googleapis.com/drive/v3' + path;
+  var headers = Object.assign({}, { 'Authorization': 'Bearer ' + this.accessToken }, options.headers || {});
+  var fetchOpts = Object.assign({}, options, { headers: headers });
+  return fetch(url, fetchOpts).then(function(res) {
+    if (!res.ok) {
+      return res.json().catch(function() { return {}; }).then(function(err) {
+        var msg = (err.error && err.error.message) ? err.error.message : 'Drive API error: ' + res.status;
+        return Promise.reject(new Error(msg));
+      });
+    }
+    return res;
+  });
+};
+
+SafePlaceStorage.prototype.getOrCreateFolder = function(name, parentId) {
+  parentId = parentId || this.rootFolderId;
+  var self = this;
+  var query = "name='" + name + "' and '" + parentId + "' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false";
+  return this._api('/files?q=' + encodeURIComponent(query) + '&fields=files(id,name)').then(function(res) {
+    return res.json();
+  }).then(function(data) {
+    if (data.files && data.files.length > 0) return data.files[0];
+    return self._api('/files', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name, mimeType: 'application/vnd.google-apps.folder', parents: [parentId] })
+    }).then(function(createRes) { return createRes.json(); });
+  });
+};
+
+SafePlaceStorage.prototype.getAppFolder = function(appName) {
+  return this.getOrCreateFolder(appName, this.rootFolderId);
+};
+
+SafePlaceStorage.prototype.findFile = function(name, folderId) {
+  folderId = folderId || this.rootFolderId;
+  var query = "name='" + name + "' and '" + folderId + "' in parents and trashed=false";
+  return this._api('/files?q=' + encodeURIComponent(query) + '&fields=files(id,name,size,modifiedTime,mimeType)').then(function(res) {
+    return res.json();
+  }).then(function(data) {
+    return (data.files && data.files.length > 0) ? data.files[0] : null;
+  });
+};
+
+SafePlaceStorage.prototype.uploadData = function(name, data, mimeType, folderId) {
+  folderId = folderId || this.rootFolderId;
+  var form = new FormData();
+  form.append('metadata', new Blob([JSON.stringify({ name: name, parents: [folderId] })], { type: 'application/json' }));
+  form.append('file', new Blob([data], { type: mimeType }));
+  return fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name', {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + this.accessToken },
+    body: form
+  }).then(function(res) {
+    if (!res.ok) {
+      return res.json().catch(function() { return {}; }).then(function(err) {
+        var msg = (err.error && err.error.message) ? err.error.message : 'Upload failed: ' + res.status;
+        return Promise.reject(new Error(msg));
+      });
+    }
+    return res.json();
+  });
+};
+
+SafePlaceStorage.prototype.downloadJSON = function(fileId) {
+  return this._api('/files/' + fileId + '?alt=media').then(function(res) {
+    return res.json();
+  });
+};
+
+SafePlaceStorage.prototype.deleteFile = function(fileId) {
+  return fetch('https://www.googleapis.com/drive/v3/files/' + fileId, {
+    method: 'DELETE',
+    headers: { 'Authorization': 'Bearer ' + this.accessToken }
+  });
+};
+
+// ── Sync state ──
+var syncTokenClient = null;
+var syncStorage = null;
+var syncAppFolderId = null;
+
+function initSyncAuth() {
+  if (typeof google === 'undefined' || !google.accounts || !google.accounts.oauth2) {
+    setTimeout(initSyncAuth, 300);
+    return;
   }
+  syncTokenClient = google.accounts.oauth2.initTokenClient({
+    client_id: SAFE_PLACE_CLIENT_ID,
+    scope: SAFE_PLACE_SCOPES,
+    callback: handleSyncAuthResponse
+  });
+  var btn = document.getElementById('syncSignInBtn');
+  if (btn) btn.disabled = false;
 }
 
-function getGitHubApiUrl() {
-  return 'https://api.github.com/repos/' + GITHUB_REPO_OWNER + '/' + GITHUB_REPO_NAME + '/contents/' + GITHUB_BACKUP_FILE;
+function handleSyncAuthResponse(response) {
+  if (response.error) {
+    setSyncStatus('Sign-in failed: ' + response.error, true);
+    return;
+  }
+  syncStorage = new SafePlaceStorage(response.access_token, null);
+  syncStorage.getOrCreateFolder('SafePlace', 'root').then(function(rootFolder) {
+    syncStorage.rootFolderId = rootFolder.id;
+    return syncStorage.getAppFolder(SAFE_PLACE_APP_NAME);
+  }).then(function(appFolder) {
+    syncAppFolderId = appFolder.id;
+    // Show sync buttons, hide sign-in
+    document.getElementById('syncSignInBtn').classList.add('hidden');
+    document.getElementById('cloudExportBtn').classList.remove('hidden');
+    document.getElementById('cloudImportBtn').classList.remove('hidden');
+    document.getElementById('syncSignOutBtn').classList.remove('hidden');
+    setSyncStatus('Connected');
+  }).catch(function(err) {
+    setSyncStatus('Error: ' + (err.message || err), true);
+  });
 }
 
-function getGitHubPagesUrl() {
-  return 'https://' + GITHUB_REPO_OWNER + '.github.io/' + GITHUB_REPO_NAME + '/' + GITHUB_BACKUP_FILE;
+function handleSyncSignIn() {
+  if (!syncTokenClient) {
+    setSyncStatus('Google API loading...', true);
+    return;
+  }
+  syncTokenClient.requestAccessToken({ prompt: 'consent' });
 }
 
-// Push encrypted backup to GitHub repo
+function handleSyncSignOut() {
+  if (syncStorage && syncStorage.accessToken) {
+    google.accounts.oauth2.revoke(syncStorage.accessToken);
+  }
+  syncStorage = null;
+  syncAppFolderId = null;
+  document.getElementById('syncSignInBtn').classList.remove('hidden');
+  document.getElementById('cloudExportBtn').classList.add('hidden');
+  document.getElementById('cloudImportBtn').classList.add('hidden');
+  document.getElementById('syncSignOutBtn').classList.add('hidden');
+  setSyncStatus('');
+}
+
+// Push encrypted backup to Google Drive
 function cloudExport() {
-  var token = getGitHubToken();
-  if (!token) {
-    showToast('Set your GitHub token first (Policy > Cloud Sync)', 'error');
+  if (!syncStorage || !syncAppFolderId) {
+    setSyncStatus('Not connected', true);
     return;
   }
   if (!cryptoKey) {
@@ -1109,137 +1236,74 @@ function cloudExport() {
     return;
   }
 
+  var btn = document.getElementById('cloudExportBtn');
+  btn.disabled = true;
+  setSyncStatus('Exporting...');
+
   var data = buildExportPayload();
   var content = JSON.stringify(data, null, 2);
-  // GitHub API requires base64-encoded content
-  var b64Content = btoa(unescape(encodeURIComponent(content)));
 
-  showToast('Uploading to GitHub...', 'warning');
-
-  // First, check if file already exists (need its SHA to update)
-  fetch(getGitHubApiUrl(), {
-    headers: {
-      'Authorization': 'Bearer ' + token,
-      'Accept': 'application/vnd.github.v3+json'
-    }
-  }).then(function(resp) {
-    if (resp.ok) return resp.json();
-    if (resp.status === 404) return null;
-    return resp.json().then(function(err) {
-      return Promise.reject(new Error(err.message || 'GitHub API error ' + resp.status));
-    });
-  }).then(function(existing) {
-    var body = {
-      message: 'vault backup ' + new Date().toISOString(),
-      content: b64Content,
-      branch: GITHUB_BRANCH
-    };
-    if (existing && existing.sha) {
-      body.sha = existing.sha; // required for updates
-    }
-    return fetch(getGitHubApiUrl(), {
-      method: 'PUT',
-      headers: {
-        'Authorization': 'Bearer ' + token,
-        'Accept': 'application/vnd.github.v3+json',
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(body)
-    });
-  }).then(function(resp) {
-    if (!resp.ok) {
-      return resp.json().then(function(err) {
-        return Promise.reject(new Error(err.message || 'Upload failed'));
-      });
-    }
-    showToast('Backup pushed to GitHub', 'success');
+  // Delete existing file first to avoid duplicates
+  syncStorage.findFile(SAFE_PLACE_FILE_NAME, syncAppFolderId).then(function(existing) {
+    if (existing) return syncStorage.deleteFile(existing.id);
+    return Promise.resolve();
+  }).then(function() {
+    return syncStorage.uploadData(SAFE_PLACE_FILE_NAME, content, 'application/json', syncAppFolderId);
+  }).then(function() {
+    setSyncStatus('Exported ' + accounts.length + ' accounts');
+    showToast('Vault exported to Google Drive', 'success');
   }).catch(function(err) {
-    showToast('Cloud export failed: ' + (err.message || err), 'error');
+    setSyncStatus('Export failed: ' + (err.message || err), true);
+  }).then(function() {
+    btn.disabled = false;
   });
 }
 
-// Pull encrypted backup from GitHub (tries Pages URL first, falls back to API)
+// Pull encrypted backup from Google Drive
 function cloudImport() {
+  if (!syncStorage || !syncAppFolderId) {
+    setSyncStatus('Not connected', true);
+    return;
+  }
   if (!cryptoKey) {
     showToast('Vault must be unlocked to import', 'error');
     return;
   }
 
-  showToast('Fetching from GitHub...', 'warning');
+  var btn = document.getElementById('cloudImportBtn');
+  btn.disabled = true;
+  setSyncStatus('Importing...');
 
-  // Try GitHub Pages URL first (works for public repos, no token needed)
-  var pagesUrl = getGitHubPagesUrl() + '?t=' + Date.now(); // cache-bust
-  fetch(pagesUrl).then(function(resp) {
-    if (resp.ok) return resp.text();
-    // Fall back to API (works for private repos with token)
-    var token = getGitHubToken();
-    if (!token) return Promise.reject(new Error('File not found on GitHub Pages and no token set'));
-    return fetch(getGitHubApiUrl(), {
-      headers: {
-        'Authorization': 'Bearer ' + token,
-        'Accept': 'application/vnd.github.v3+json'
-      }
-    }).then(function(apiResp) {
-      if (!apiResp.ok) return Promise.reject(new Error('GitHub API error ' + apiResp.status));
-      return apiResp.json().then(function(fileData) {
-        // API returns base64-encoded content
-        return decodeURIComponent(escape(atob(fileData.content.replace(/\n/g, ''))));
-      });
-    });
-  }).then(function(text) {
-    var data = JSON.parse(text);
+  syncStorage.findFile(SAFE_PLACE_FILE_NAME, syncAppFolderId).then(function(file) {
+    if (!file) {
+      setSyncStatus('No backup found', true);
+      return Promise.reject(new Error('No backup found on Google Drive'));
+    }
+    return syncStorage.downloadJSON(file.id);
+  }).then(function(data) {
     return applyImportData(data).then(function() {
-      showToast('Cloud import complete (' + accounts.length + ' accounts)', 'success');
+      setSyncStatus('Imported ' + accounts.length + ' accounts');
+      showToast('Vault imported from Google Drive (' + accounts.length + ' accounts)', 'success');
     });
   }).catch(function(err) {
-    var msg = err.message || 'Cloud import failed';
+    var msg = err.message || 'Import failed';
     if (msg === 'Import cancelled') showToast(msg, 'warning');
-    else showToast('Cloud import failed: ' + msg, 'error');
+    else if (msg !== 'No backup found on Google Drive') setSyncStatus('Import failed: ' + msg, true);
+  }).then(function() {
+    btn.disabled = false;
   });
 }
 
-// Show GitHub token configuration dialog
-function showCloudSyncDialog() {
-  var currentToken = getGitHubToken();
-  var masked = currentToken ? currentToken.substring(0, 8) + '...' + currentToken.slice(-4) : 'Not set';
-  var pagesUrl = getGitHubPagesUrl();
-
-  var html = '<h2>&#9729; Cloud Sync Settings</h2>' +
-    '<p style="color:var(--text-dim);font-size:12px;margin-bottom:16px;">' +
-      'Sync your encrypted vault to <strong>' + escHtml(GITHUB_REPO_OWNER + '/' + GITHUB_REPO_NAME) + '</strong> via GitHub.' +
-    '</p>' +
-    '<div class="form-group"><label>GitHub Personal Access Token</label>' +
-      '<input type="password" id="github-token-input" placeholder="ghp_xxxxxxxxxxxx" value="' + escAttr(currentToken) + '" autocomplete="off">' +
-      '<p style="color:var(--text-muted);font-size:11px;margin-top:4px;">Needs <code>repo</code> scope. ' +
-        '<a href="https://github.com/settings/tokens/new?scopes=repo&description=password-manager-sync" target="_blank" ' +
-        'style="color:var(--accent);">Create token</a></p>' +
-    '</div>' +
-    '<div class="form-group"><label>Status</label>' +
-      '<div style="padding:4px 0;font-size:13px;color:var(--text-muted);">Token: ' + escHtml(masked) + '</div>' +
-      '<div style="padding:4px 0;font-size:11px;color:var(--text-muted);">Pages URL: <a href="' + escAttr(pagesUrl) + '" target="_blank" style="color:var(--accent);word-break:break-all;">' + escHtml(pagesUrl) + '</a></div>' +
-    '</div>' +
-    '<div class="btn-group" style="margin-top:16px;">' +
-      '<button class="btn btn-primary" onclick="saveCloudToken()">save token</button>' +
-      '<button class="btn btn-outline" onclick="clearCloudToken()">clear token</button>' +
-      '<button class="btn btn-outline" onclick="closeModal()">close</button>' +
-    '</div>';
-
-  document.getElementById('modal-content').innerHTML = html;
-  document.getElementById('modal-overlay').classList.add('active');
-}
-
-function saveCloudToken() {
-  var token = document.getElementById('github-token-input').value.trim();
-  if (!token) { showToast('Token is required', 'error'); return; }
-  saveGitHubToken(token);
-  closeModal();
-  showToast('GitHub token saved', 'success');
-}
-
-function clearCloudToken() {
-  saveGitHubToken('');
-  closeModal();
-  showToast('GitHub token cleared', 'success');
+function setSyncStatus(msg, isError) {
+  var el = document.getElementById('syncStatus');
+  if (!el) return;
+  el.textContent = msg;
+  el.style.color = isError ? 'var(--red)' : 'var(--text-muted)';
+  if (msg && !isError) {
+    setTimeout(function() {
+      if (el.textContent === msg) el.textContent = '';
+    }, 4000);
+  }
 }
 
 function clearAllData() {
