@@ -1040,16 +1040,61 @@ function applyImportData(data) {
 // ══════════════════════════════════════════════════════════════
 
 var safePlaceFrame = document.getElementById('safePlaceFrame');
+var safePlaceReady = false;
+
+// Listen for a ready signal from SafePlace iframe
+window.addEventListener('message', function(event) {
+  if (event.origin !== SAFE_PLACE_ORIGIN) return;
+  var msg = event.data;
+  if (msg && (msg.type === 'safeplace-ready' || msg.type === 'safeplace-response')) {
+    safePlaceReady = true;
+  }
+});
+
+// Wait for the iframe to be loaded (basic readiness check)
+safePlaceFrame.addEventListener('load', function() {
+  // Give the iframe app a moment to initialize its message listener
+  setTimeout(function() { safePlaceReady = true; }, 1500);
+});
+
+// Reload the SafePlace iframe to pick up fresh auth state.
+// Needed because the user may sign in to SafePlace in a separate tab
+// after the iframe was already loaded with stale (unauthenticated) state.
+function reloadSafePlaceIframe() {
+  return new Promise(function(resolve) {
+    safePlaceReady = false;
+    function onLoad() {
+      safePlaceFrame.removeEventListener('load', onLoad);
+      // Wait for the SafePlace app inside the iframe to initialize
+      setTimeout(function() { safePlaceReady = true; resolve(); }, 2000);
+    }
+    safePlaceFrame.addEventListener('load', onLoad);
+    safePlaceFrame.src = safePlaceFrame.src;
+  });
+}
+
+// When user returns to this tab, reload the iframe so it picks up
+// any auth changes made in another tab (e.g. signing into SafePlace)
+document.addEventListener('visibilitychange', function() {
+  if (document.visibilityState === 'visible') {
+    reloadSafePlaceIframe();
+  }
+});
 
 // Send a request to safe-place iframe and wait for response (ES5)
 function safePlaceRequest(action, params) {
   params = params || {};
   return new Promise(function(resolve, reject) {
+    if (!safePlaceFrame.contentWindow) {
+      reject(new Error('Safe Place iframe not available. Try refreshing the page.'));
+      return;
+    }
+
     var id = 'sp_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
     var timeout = setTimeout(function() {
       window.removeEventListener('message', handler);
-      reject(new Error('Safe Place not responding. Make sure you are signed in at Safe Place.'));
-    }, 10000);
+      reject(new Error('Safe Place not responding. Try refreshing the page or check your connection.'));
+    }, 15000);
 
     function handler(event) {
       if (event.origin !== SAFE_PLACE_ORIGIN) return;
@@ -1067,14 +1112,35 @@ function safePlaceRequest(action, params) {
   });
 }
 
+// Check if user is authenticated in SafePlace.
+// On first failure, reload the iframe and retry once -- the user may have
+// signed in on another tab after the iframe was originally loaded.
+function checkSafePlaceAuth() {
+  return safePlaceRequest('ping').then(function() {
+    return true;
+  }).catch(function() {
+    // First attempt failed -- reload iframe to pick up fresh auth state
+    return reloadSafePlaceIframe().then(function() {
+      return safePlaceRequest('ping').then(function() {
+        return true;
+      }).catch(function() {
+        return false;
+      });
+    });
+  });
+}
+
 function handleSyncError(err) {
   setSyncStatus('');
   var msg = err.message || '';
   var isAuthError = msg.indexOf('Not authenticated') !== -1 ||
-                    msg.indexOf('not responding') !== -1 ||
-                    msg.indexOf('sign in') !== -1;
+                    msg.indexOf('not authenticated') !== -1;
+  var isNotResponding = msg.indexOf('not responding') !== -1;
+
   if (isAuthError) {
     showSyncAuthDialog();
+  } else if (isNotResponding) {
+    showSyncConnectionDialog();
   } else {
     showToast(msg || 'Sync failed', 'error');
   }
@@ -1085,6 +1151,19 @@ function showSyncAuthDialog() {
     '<p style="color:var(--text-dim);font-size:13px;margin-bottom:16px;">' +
     'You need to sign in to Safe Place first to use Google Drive backup. ' +
     'Open Safe Place in a new tab, sign in, then come back and try again.</p>' +
+    '<div class="btn-group">' +
+      '<button class="btn btn-primary" onclick="window.open(\'https://dat5ngon.github.io/safe-place/\', \'_blank\'); closeModal();">open safe place</button>' +
+      '<button class="btn btn-outline" onclick="closeModal()">cancel</button>' +
+    '</div>';
+  document.getElementById('modal-content').innerHTML = html;
+  document.getElementById('modal-overlay').classList.add('active');
+}
+
+function showSyncConnectionDialog() {
+  var html = '<h2>Connection Issue</h2>' +
+    '<p style="color:var(--text-dim);font-size:13px;margin-bottom:16px;">' +
+    'Could not connect to Safe Place. Try refreshing the page. ' +
+    'If the problem persists, open Safe Place in a new tab to check your sign-in status.</p>' +
     '<div class="btn-group">' +
       '<button class="btn btn-primary" onclick="window.open(\'https://dat5ngon.github.io/safe-place/\', \'_blank\'); closeModal();">open safe place</button>' +
       '<button class="btn btn-outline" onclick="closeModal()">cancel</button>' +
@@ -1104,16 +1183,26 @@ function exportToGDrive() {
     return;
   }
 
-  setSyncStatus('Exporting to Google Drive...');
-  var data = buildExportPayload();
+  setSyncStatus('Checking sign-in...');
 
-  safePlaceRequest('save', {
-    app: SAFE_PLACE_APP,
-    filename: SAFE_PLACE_FILE,
-    data: data
-  }).then(function() {
-    setSyncStatus('Exported ' + accounts.length + ' accounts');
-    showToast('Vault exported to Google Drive', 'success');
+  checkSafePlaceAuth().then(function(isAuthed) {
+    if (!isAuthed) {
+      setSyncStatus('');
+      showSyncAuthDialog();
+      return;
+    }
+
+    setSyncStatus('Exporting to Google Drive...');
+    var data = buildExportPayload();
+
+    return safePlaceRequest('save', {
+      app: SAFE_PLACE_APP,
+      filename: SAFE_PLACE_FILE,
+      data: data
+    }).then(function() {
+      setSyncStatus('Exported ' + accounts.length + ' accounts');
+      showToast('Vault exported to Google Drive', 'success');
+    });
   }).catch(function(err) {
     handleSyncError(err);
   });
@@ -1126,20 +1215,30 @@ function importFromGDrive() {
     return;
   }
 
-  setSyncStatus('Importing from Google Drive...');
+  setSyncStatus('Checking sign-in...');
 
-  safePlaceRequest('load', {
-    app: SAFE_PLACE_APP,
-    filename: SAFE_PLACE_FILE
-  }).then(function(result) {
-    if (!result.data) {
+  checkSafePlaceAuth().then(function(isAuthed) {
+    if (!isAuthed) {
       setSyncStatus('');
-      showToast('No backup found on Google Drive', 'warning');
+      showSyncAuthDialog();
       return;
     }
-    return applyImportData(result.data).then(function() {
-      setSyncStatus('Imported ' + accounts.length + ' accounts');
-      showToast('Vault imported from Google Drive (' + accounts.length + ' accounts)', 'success');
+
+    setSyncStatus('Importing from Google Drive...');
+
+    return safePlaceRequest('load', {
+      app: SAFE_PLACE_APP,
+      filename: SAFE_PLACE_FILE
+    }).then(function(result) {
+      if (!result.data) {
+        setSyncStatus('');
+        showToast('No backup found on Google Drive', 'warning');
+        return;
+      }
+      return applyImportData(result.data).then(function() {
+        setSyncStatus('Imported ' + accounts.length + ' accounts');
+        showToast('Vault imported from Google Drive (' + accounts.length + ' accounts)', 'success');
+      });
     });
   }).catch(function(err) {
     var msg = err.message || '';
